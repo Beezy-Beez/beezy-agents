@@ -15,7 +15,7 @@ run = "cd /home/runner/workspace && uvicorn app.main:app --reload --port $PORT"
 [services.production]
 
 [services.production.run]
-args = ["bash", "-c", "cd /home/runner/workspace && uvicorn app.main:app --host 0.0.0.0 --port 8080"]
+args = ["bash", "-c", "cd /home/runner/workspace && uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
 
 [services.production.run.env]
 PORT = "8080"
