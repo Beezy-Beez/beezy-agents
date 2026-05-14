@@ -20,15 +20,19 @@ _last_cron_minute = -1
 
 
 async def _slack_loop():
-    """Polls Slack every 5 seconds."""
+    """Polls Slack every 5 seconds; backs off to 30s on network errors."""
     loop = asyncio.get_event_loop()
     while True:
+        sleep_secs = 5
         try:
             from agents.slack_agent import run_once
             await loop.run_in_executor(None, run_once)
         except Exception as e:
+            import httpx as _httpx
+            if isinstance(e, _httpx.NetworkError):
+                sleep_secs = 30
             print(f"[slack_loop] {e}")
-        await asyncio.sleep(5)
+        await asyncio.sleep(sleep_secs)
 
 
 def _run_cron_jobs(now: datetime) -> None:

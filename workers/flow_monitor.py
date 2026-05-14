@@ -78,17 +78,20 @@ def _get_live_flows() -> list[dict]:
 
 
 def _get_flow_performance() -> list[dict]:
-    """Pull 30-day flow performance from Klaviyo reporting API."""
+    """Pull 30-day flow performance from Klaviyo reporting API.
+
+    Returns a list of dicts with keys: flow_id, statistics (dict).
+    Aggregates per-message rows up to the flow level.
+    """
     url = "https://a.klaviyo.com/api/flow-values-reports/"
     payload = {
         "data": {
             "type": "flow-values-report",
             "attributes": {
-                "statistics": ["recipients", "open_rate", "click_rate", "conversion_rate"],
-                "value_statistics": ["revenue_per_recipient", "conversion_value"],
+                "statistics": ["recipients", "open_rate", "click_rate", "conversion_rate", "conversion_value"],
                 "timeframe": {"key": "last_30_days"},
                 "conversion_metric_id": CONVERSION_METRIC_ID,
-                "group_by": ["flow_id", "send_channel"],
+                "group_by": ["flow_id", "flow_message_id"],
             }
         }
     }
@@ -97,8 +100,43 @@ def _get_flow_performance() -> list[dict]:
         print(f"[flow_monitor] Failed to get flow report: {resp.status_code}")
         return []
 
-    data = resp.json().get("data", {}).get("attributes", {})
-    return data.get("flow_aggregation", [])
+    rows = resp.json().get("data", {}).get("attributes", {}).get("results", [])
+
+    # Aggregate per-message rows up to flow level
+    by_flow: dict = {}
+    for row in rows:
+        flow_id = row.get("groupings", {}).get("flow_id", "")
+        if not flow_id:
+            continue
+        stats = row.get("statistics", {})
+        if flow_id not in by_flow:
+            by_flow[flow_id] = {"recipients": 0.0, "conversion_value": 0.0,
+                                "open_rate_sum": 0.0, "click_rate_sum": 0.0,
+                                "conversion_rate_sum": 0.0, "msg_count": 0}
+        e = by_flow[flow_id]
+        e["recipients"] += float(stats.get("recipients", 0))
+        e["conversion_value"] += float(stats.get("conversion_value", 0))
+        e["open_rate_sum"] += float(stats.get("open_rate", 0))
+        e["click_rate_sum"] += float(stats.get("click_rate", 0))
+        e["conversion_rate_sum"] += float(stats.get("conversion_rate", 0))
+        e["msg_count"] += 1
+
+    result = []
+    for flow_id, agg in by_flow.items():
+        mc = max(agg["msg_count"], 1)
+        rec = agg["recipients"]
+        result.append({
+            "flow_id": flow_id,
+            "statistics": {
+                "recipients": rec,
+                "conversion_value": agg["conversion_value"],
+                "revenue_per_recipient": agg["conversion_value"] / rec if rec > 0 else 0.0,
+                "open_rate": agg["open_rate_sum"] / mc,
+                "click_rate": agg["click_rate_sum"] / mc,
+                "conversion_rate": agg["conversion_rate_sum"] / mc,
+            },
+        })
+    return result
 
 
 def _classify_flow(flow_id: str) -> str:
@@ -109,9 +147,8 @@ def _classify_flow(flow_id: str) -> str:
 def _analyze_flow(flow_data: dict) -> dict:
     """Analyze a single flow against benchmarks. Returns analysis dict."""
     flow_id = flow_data.get("flow_id", "")
-    details = flow_data.get("flow_details", {}).get("attributes", {})
     stats = flow_data.get("statistics", {})
-    name = details.get("name", flow_id)
+    name = flow_data.get("name", flow_id)
 
     flow_type = _classify_flow(flow_id)
     benchmarks = FLOW_BENCHMARKS.get(flow_type, FLOW_BENCHMARKS["default"])
@@ -180,10 +217,18 @@ def run_flow_check() -> str:
 
     print("[flow_monitor] Running weekly flow health check...")
 
+    # Pull live flow names
+    live_flows = _get_live_flows()
+    flow_names = {f["id"]: f.get("attributes", {}).get("name", f["id"]) for f in live_flows}
+
     # Pull performance data
     flow_perf = _get_flow_performance()
     if not flow_perf:
         return "no_data"
+
+    # Merge names into performance rows
+    for fp in flow_perf:
+        fp["name"] = flow_names.get(fp["flow_id"], fp["flow_id"])
 
     # Analyze each flow
     analyses = [_analyze_flow(f) for f in flow_perf]
