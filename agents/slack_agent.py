@@ -351,6 +351,24 @@ def _handle_modify_calendar(conn, params: dict) -> str:
     except Exception as ex:
         page_url = "(page update failed: " + str(ex) + ")"
 
+    # P10-B: Ensure all added slots have revenue_estimate computed from live RPR × list size
+    FALLBACK_RPR = {
+        "active_seal": 1.268, "whales": 0.658, "lapsed_30d": 0.267, "vip": 0.161,
+        "engaged_customers": 0.101, "one_time_buyers": 0.056, "engaged_prospects": 0.064,
+        "super_engaged": 0.120,
+    }
+    FALLBACK_LIST = {
+        "active_seal": 511, "whales": 1038, "lapsed_30d": 3618, "vip": 5424,
+        "engaged_customers": 13340, "one_time_buyers": 12951, "engaged_prospects": 12002,
+        "super_engaged": 4447,
+    }
+    for slot in diff.get("slots_to_add", []):
+        if not slot.get("revenue_estimate"):
+            aud = slot.get("audience", "")
+            rpr = FALLBACK_RPR.get(aud, 0.10)
+            lst = FALLBACK_LIST.get(aud, 1000)
+            slot["revenue_estimate"] = round(rpr * lst, 2)
+
     added   = len(diff.get("slots_to_add", []))
     removed = len(diff.get("slots_to_remove_by_date_and_type", []))
     desc    = diff.get("description", request)
@@ -508,6 +526,33 @@ def _handle_view_calendar(conn, params: dict) -> str:
     return f"Calendar: {url}"
 
 
+def _handle_cancel_campaign(conn, params: dict) -> str:
+    campaign_id = params.get("campaign_id", "").strip()
+    if not campaign_id:
+        return "Please provide a campaign ID: `cancel ABC123`"
+    # Mark as cancelled in pending_schedules
+    try:
+        row = conn.execute("SELECT value FROM agent_state WHERE key='pending_schedules'").fetchone()
+        if row:
+            pending = json.loads(row[0]) if row[0] else []
+            found = False
+            for entry in pending:
+                if entry.get("campaign_id", "").lower() == campaign_id.lower():
+                    entry["cancelled"] = True
+                    found = True
+            if found:
+                conn.execute(
+                    "INSERT INTO agent_state (key, value, updated_at) VALUES ('pending_schedules', %s, NOW()) "
+                    "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                    (json.dumps(pending),)
+                )
+                conn.commit()
+                return f"✅ Campaign `{campaign_id}` cancelled. It will not be scheduled."
+    except Exception as e:
+        return f"❌ Error cancelling: {e}"
+    return f"⚠️ Campaign `{campaign_id}` not found in pending queue. May already be scheduled or sent."
+
+
 HANDLERS = {
     "approve_calendar":  lambda conn, _: _handle_approve_calendar(conn),
     "approve_week":      lambda conn, _: _handle_approve_week(conn),
@@ -528,6 +573,7 @@ HANDLERS = {
     "view_calendar":     _handle_view_calendar,
     "modify_calendar":   _handle_modify_calendar,
     "query_calendar":    _handle_query_calendar,
+    "cancel_campaign":   _handle_cancel_campaign,
 }
 
 
@@ -576,7 +622,13 @@ def _process_beezy_agents(conn) -> None:
                 "flow check": {"action": "flow_check"},
                 "flow health": {"action": "flow_check"},
             }
-            result = fast_match.get(text_lower)
+            # Cancel campaign — "cancel ABC123"
+            import re as _re
+            cancel_match = _re.match(r'^cancel\s+([A-Za-z0-9]+)$', text_lower)
+            if cancel_match:
+                result = {"action": "cancel_campaign", "params": {"campaign_id": cancel_match.group(1)}}
+            else:
+                result = fast_match.get(text_lower)
             if result:
                 _post_message(BEEZY_AGENTS_CHANNEL, "⏳ On it...")
             else:

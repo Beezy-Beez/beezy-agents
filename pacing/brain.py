@@ -297,3 +297,161 @@ def top_contributors(days: int = 7) -> dict[str, list[Contributor]]:
         campaigns = _top_campaign_contributors(conn, days)
         flows = _top_flow_contributors(conn, days)
     return {"campaigns": campaigns, "flows": flows}
+
+
+def compute_daily_priorities(as_of: datetime | None = None) -> dict:
+    """Phase 2B priority brain — decide today's operating mode from pacing state.
+
+    Returns a dict with mode, reasoning, recommended_actions, and writes rows to
+    both `decisions` (decision_type='daily_priority') and `priorities` tables.
+
+    Modes:
+      boost    — behind >20%: add unscheduled high-RPR slot
+      push     — behind 5-20%: prioritize high-RPR segments first
+      maintain — on-track ±5%: run as planned
+      ease     — ahead >5%: can skip lowest-RPR slots if at cadence limit
+    """
+    import json
+    if as_of is None:
+        as_of = datetime.now(timezone.utc).replace(microsecond=0)
+
+    goals = active_goals()
+    if not goals:
+        return {"mode": "maintain", "reasoning": "No active goals", "recommended_actions": []}
+
+    # Use first active goal (the $150K/month revenue goal)
+    goal = goals[0]
+    state = compute_pacing_state(goal.id, as_of=as_of)
+    gap_pct = float(state.gap_pct)
+
+    today = as_of.date()
+    today_iso = today.isoformat()
+
+    # Read today's calendar slots from decisions table
+    today_slots = []
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT output FROM decisions WHERE decision_type='calendar_plan' AND output->>'month'=%s ORDER BY created_at DESC LIMIT 1",
+            (today.strftime("%Y-%m"),)
+        ).fetchone()
+        if row:
+            payload = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+            today_slots = [s for s in payload.get("slots", []) if s.get("date") == today_iso]
+
+    # Determine mode
+    if gap_pct < -20:
+        mode = "boost"
+        reasoning = f"Revenue is {abs(gap_pct):.1f}% behind target. Aggressive recovery needed."
+        recommended_actions = [
+            "Add unscheduled high-RPR slot (lapsed_30d or VIP) if not sent in 7+ days",
+            "Prioritize sleep audio + email over SEO content today",
+            "Flag in morning brief as BOOST MODE",
+        ]
+    elif gap_pct < -5:
+        mode = "push"
+        reasoning = f"Revenue is {abs(gap_pct):.1f}% behind target. Stay on schedule, prioritize high-RPR."
+        recommended_actions = [
+            "Run all planned slots — do not skip any",
+            "Prioritize highest-RPR audience if multiple slots today",
+        ]
+    elif gap_pct > 5:
+        mode = "ease"
+        reasoning = f"Revenue is {gap_pct:.1f}% ahead of target. System is performing well."
+        recommended_actions = [
+            "Run planned slots; can skip lowest-priority slot if already at 3/day cadence",
+            "Focus on content quality over volume",
+        ]
+    else:
+        mode = "maintain"
+        reasoning = f"Revenue is within ±5% of target ({gap_pct:+.1f}%). Proceed as planned."
+        recommended_actions = ["Execute calendar as planned"]
+
+    output = {
+        "mode": mode,
+        "date": today_iso,
+        "gap_pct": gap_pct,
+        "reasoning": reasoning,
+        "recommended_actions": recommended_actions,
+        "today_slots": len(today_slots),
+        "status": state.status,
+        "period_to_date": float(state.period_to_date_value),
+        "required_daily_rate": float(state.required_daily_rate),
+    }
+
+    pacing_snapshot = {
+        "gap_pct": gap_pct,
+        "status": state.status,
+        "period_to_date_value": float(state.period_to_date_value),
+        "required_daily_rate": float(state.required_daily_rate),
+        "days_remaining": state.days_remaining,
+    }
+
+    # Write to decisions + priorities tables
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO decisions (decided_by, decision_type, input_context, reasoning, output) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                ("pacing_brain", "daily_priority", json.dumps({"goal_id": goal.id, "as_of": as_of.isoformat()}),
+                 reasoning, json.dumps(output))
+            )
+            conn.execute(
+                "INSERT INTO priorities (decided_at, effective_for, prioritized_workers, reasoning, pacing_snapshot) "
+                "VALUES (NOW(), %s, %s, %s, %s)",
+                (today, json.dumps([mode]), reasoning, json.dumps(pacing_snapshot))
+            )
+            conn.commit()
+    except Exception as exc:
+        print(f"[brain] priorities write error: {exc}")
+
+    return output
+
+
+def content_strategy_attribution(days: int = 90) -> dict:
+    """Classify calendar_executions by topic theme and compute RPR per pillar.
+
+    Pillars: sleep_science | product_offer | story_narrative | other
+    Returns dict with avg_rpr, total_revenue, sends per pillar.
+    """
+    SLEEP_KEYWORDS = {"sleep", "science", "research", "study", "brain", "rem", "cortisol", "melatonin", "circadian"}
+    OFFER_KEYWORDS = {"% off", "discount", "bundle", "deal", "save", "code", "limited", "sale", "bogo"}
+    STORY_KEYWORDS = {"years ago", "discovered", "story", "one night", "her name", "he noticed", "she realized"}
+
+    def classify(topic: str) -> str:
+        t = (topic or "").lower()
+        if any(k in t for k in STORY_KEYWORDS):
+            return "story_narrative"
+        if any(k in t for k in OFFER_KEYWORDS):
+            return "product_offer"
+        if any(k in t for k in SLEEP_KEYWORDS):
+            return "sleep_science"
+        return "other"
+
+    try:
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT topic_angle, actual_rpr, actual_revenue FROM calendar_executions "
+                "WHERE is_preliminary = false AND actual_rpr > 0 "
+                f"AND slot_date > CURRENT_DATE - INTERVAL '{int(days)} days'"
+            ).fetchall()
+    except Exception:
+        return {}
+
+    pillars: dict[str, dict] = {}
+    for topic, rpr, revenue in rows:
+        pillar = classify(topic or "")
+        if pillar not in pillars:
+            pillars[pillar] = {"sends": 0, "total_rpr": 0.0, "total_revenue": 0.0}
+        pillars[pillar]["sends"] += 1
+        pillars[pillar]["total_rpr"] += float(rpr or 0)
+        pillars[pillar]["total_revenue"] += float(revenue or 0)
+
+    result = {}
+    for pillar, data in pillars.items():
+        sends = data["sends"]
+        result[pillar] = {
+            "sends": sends,
+            "avg_rpr": round(data["total_rpr"] / sends, 4) if sends else 0,
+            "total_revenue": round(data["total_revenue"], 2),
+        }
+    return result

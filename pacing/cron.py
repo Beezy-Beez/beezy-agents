@@ -34,6 +34,7 @@ from pacing.brain import (
     PacingState,
     active_goals,
     compute_pacing_state,
+    compute_daily_priorities,
     top_contributors,
 )
 
@@ -175,6 +176,11 @@ def _post_slack(payload: dict[str, Any]) -> None:
         logger.exception("Failed to POST pacing digest to Slack")
 
 
+def run_daily(*, dry_run: bool = False) -> list[dict[str, Any]]:
+    """Alias for run_daily_pacing — called by app/main.py cron loop."""
+    return run_daily_pacing(dry_run=dry_run)
+
+
 def run_daily_pacing(*, dry_run: bool = False) -> list[dict[str, Any]]:
     """For each active goal: compute state, persist, and post (or print) a Slack digest.
 
@@ -187,6 +193,12 @@ def run_daily_pacing(*, dry_run: bool = False) -> list[dict[str, Any]]:
     if not goals:
         logger.warning("No active goals — nothing to compute")
         return []
+
+    # Phase 2B: compute daily priority mode + write to decisions/priorities tables
+    try:
+        compute_daily_priorities(as_of=as_of)
+    except Exception as exc:
+        logger.warning("compute_daily_priorities failed: %s", exc)
 
     results: list[dict[str, Any]] = []
     for goal in goals:

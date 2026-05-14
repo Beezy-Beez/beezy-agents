@@ -135,22 +135,23 @@ def run_weekly_brief() -> None:
             )
         body_lines.append("")
 
-    body_lines.append("*Projected revenue this week (campaigns/SMS only):* $" + str(int(total_rev)))
+    body_lines.append("*Projected revenue this week:* $" + str(int(total_rev)))
     body_lines.append("")
-    body_lines.append("*To approve, run this in Replit shell:*")
-    body_lines.append("```python -c \"from db.connection import get_conn; conn=get_conn(); conn.execute(\\\"INSERT INTO calendar_approvals (week_start, token, approved_at) VALUES ('" + week_start.isoformat() + "', 'manual', NOW()) ON CONFLICT (week_start) DO UPDATE SET approved_at = NOW()\\\"); conn.commit()\"```")
+    body_lines.append("✅ *To approve, simply type:* `approved week`")
+    body_lines.append("_Or click the Approve button on the dashboard._")
     body_lines.append("")
-    body_lines.append("_Once approved, slots execute automatically each morning at 8am ET._")
-    body_lines.append("_SEO blog posts publish automatically. Campaigns post as Slack drafts for you to build in Klaviyo._")
+    body_lines.append("Once you approve:")
+    body_lines.append("  • Campaigns run automatically every morning at 8am")
+    body_lines.append("  • You'll get a daily morning update with what went out and how revenue looks")
+    body_lines.append("  • Nothing else needed from you until next Sunday")
 
     week_end_label = (week_start + timedelta(days=6)).strftime("%b %d")
     post_draft(
-        title="Weekly Plan -- " + week_start.strftime("%b %d") + " to " + week_end_label + " (PENDING APPROVAL)",
+        title="Your week is ready — " + week_start.strftime("%b %d") + " to " + week_end_label,
         summary_lines=[
-            "Slots:            " + str(len(slots)),
-            "Projected rev:    $" + str(int(total_rev)),
-            "Week:             " + week_start.isoformat() + " to " + (week_start + timedelta(days=6)).isoformat(),
-            "Status:           PENDING -- click link below to approve",
+            "📅 " + str(len(slots)) + " campaigns planned",
+            "💰 Projected revenue: $" + str(int(total_rev)),
+            "👆 Type `approved week` to activate everything",
         ],
         body="\n".join(body_lines),
     )

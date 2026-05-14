@@ -602,18 +602,114 @@ def run(slot: dict) -> dict:
         print("[beezy_campaign] Assigning template...")
         _assign_template(message_id, template_id)
 
-    # Auto-schedule — campaign goes from Draft → Scheduled
-    print("[beezy_campaign] Auto-scheduling...")
-    sched_result = schedule_campaign(campaign_id, slot)
-    if sched_result["scheduled"]:
-        sched_note = "✅ Scheduled for " + sched_result["send_time"]
-    else:
-        sched_note = "⚠️ Draft only — " + sched_result.get("error", "unknown")
-    print("[beezy_campaign]   " + sched_note)
-
-    # Slack notify (include schedule status)
-    _slack_notify(slot, copy, campaign_id, page_url, cdn_url)
+    # ── 60-minute preview window ──────────────────────────────────────────
+    print("[beezy_campaign] Posting preview — 60-minute cancel window...")
+    _post_preview(slot, copy, campaign_id, cdn_url)
+    _store_pending_schedule(campaign_id, slot, copy, cdn_url, page_url)
 
     camp_url = "https://www.klaviyo.com/campaign/" + campaign_id + "/wizard"
-    print("[beezy_campaign]   Done: " + camp_url + " | " + sched_note)
+    print("[beezy_campaign]   Preview posted. Auto-schedules in 60 min: " + camp_url)
     return {"campaign_url": camp_url, "page_url": page_url, "campaign_id": campaign_id}
+
+
+def _post_preview(slot: dict, copy: dict, campaign_id: str, image_url: str) -> None:
+    webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+    if not webhook:
+        return
+    aud = slot.get("audience", "?")
+    send_time = slot.get("send_time_est", "TBD")
+    rev = int(slot.get("revenue_estimate", 0) or 0)
+    body_preview = " ".join(copy.get("body_paragraphs", [""])[:1])[:140]
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": "👁 Campaign Preview — ready to schedule"}},
+        {"type": "image", "image_url": image_url, "alt_text": "Email hero"},
+        {"type": "section", "text": {"type": "mrkdwn", "text": (
+            f"📧 *Subject:* `{copy.get('subject', '')}`\n"
+            f"👥 *Audience:* {aud}\n"
+            f"🕐 *Scheduled:* {send_time} ET\n"
+            f"💰 *Est. revenue:* ${rev:,}\n\n"
+            f"_{body_preview}..._\n\n"
+            f"✅ Auto-schedules in 60 minutes unless you cancel.\n"
+            f"❌ Type `cancel {campaign_id}` to abort.\n"
+            f"Klaviyo: https://www.klaviyo.com/campaign/{campaign_id}/wizard"
+        )}},
+    ]
+    httpx.post(webhook, json={"text": "Campaign preview", "blocks": blocks}, timeout=10)
+
+
+def _store_pending_schedule(campaign_id: str, slot: dict, copy: dict, image_url: str, page_url: str) -> None:
+    """Store campaign in agent_state as pending_schedule so the cron can auto-schedule it after 60 min."""
+    try:
+        from db.connection import get_conn
+        now_iso = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "campaign_id": campaign_id,
+            "slot": slot,
+            "copy": {k: copy.get(k, "") for k in ("subject", "send_time_est", "from_label")},
+            "image_url": image_url,
+            "page_url": page_url,
+            "queued_at": now_iso,
+            "cancelled": False,
+        }
+        with get_conn() as conn:
+            row = conn.execute("SELECT value FROM agent_state WHERE key='pending_schedules'").fetchone()
+            pending = json.loads(row[0]) if row else []
+            pending.append(entry)
+            conn.execute(
+                "INSERT INTO agent_state (key, value, updated_at) VALUES ('pending_schedules', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                (json.dumps(pending),)
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"[beezy_campaign] pending_schedule store error: {e}")
+
+
+def check_pending_schedules() -> None:
+    """Called by cron every few minutes — schedules any campaigns older than 60 minutes."""
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            row = conn.execute("SELECT value FROM agent_state WHERE key='pending_schedules'").fetchone()
+        if not row:
+            return
+        pending = json.loads(row[0])
+    except Exception as e:
+        print(f"[check_pending_schedules] read error: {e}")
+        return
+
+    now = datetime.now(timezone.utc)
+    updated = []
+    for entry in pending:
+        if entry.get("cancelled"):
+            continue  # skip cancelled
+        queued_at = datetime.fromisoformat(entry["queued_at"].replace("Z", "+00:00"))
+        age_minutes = (now - queued_at).total_seconds() / 60
+        if age_minutes < 60:
+            updated.append(entry)  # keep — not yet 60 minutes
+            continue
+        # Time to schedule
+        campaign_id = entry["campaign_id"]
+        slot = entry.get("slot", {})
+        print(f"[check_pending_schedules] scheduling {campaign_id} after {age_minutes:.0f}min")
+        try:
+            sched_result = schedule_campaign(campaign_id, slot)
+            note = "scheduled: " + sched_result.get("send_time", "?")
+        except Exception as se:
+            note = "schedule_error: " + str(se)[:60]
+            updated.append(entry)  # retry next pass
+            continue
+        print(f"[check_pending_schedules]   {campaign_id}: {note}")
+        # Don't add to updated — removes from pending list
+
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO agent_state (key, value, updated_at) VALUES ('pending_schedules', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                (json.dumps(updated),)
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"[check_pending_schedules] write error: {e}")

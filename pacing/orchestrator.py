@@ -34,6 +34,21 @@ def _is_approved(conn) -> bool:
         return cur.fetchone() is not None
 
 
+def _today_priority_mode(conn) -> str:
+    """Read today's priority mode from priorities table. Default: maintain."""
+    try:
+        row = conn.execute(
+            "SELECT prioritized_workers, pacing_snapshot FROM priorities WHERE effective_for=%s ORDER BY decided_at DESC LIMIT 1",
+            (date.today(),)
+        ).fetchone()
+        if row and row[0]:
+            workers = row[0] if isinstance(row[0], list) else json.loads(row[0])
+            return workers[0] if workers else "maintain"
+    except Exception:
+        pass
+    return "maintain"
+
+
 def _already_ran(conn, decision_id, slot):
     with conn.cursor() as cur:
         cur.execute(
@@ -126,12 +141,20 @@ def run_daily():
             )
             return
 
+        priority_mode = _today_priority_mode(conn)
+        print(f"[orchestrator] Priority mode: {priority_mode}")
+
         decision_id, all_slots = _latest_calendar(conn)
         if not decision_id:
             print("[orchestrator] No calendar plan for this month.")
             return
 
         today_slots = _todays_slots(all_slots)
+
+        # Boost mode: sort slots by revenue_estimate descending so highest-RPR goes first
+        if priority_mode in ("boost", "push"):
+            today_slots = sorted(today_slots, key=lambda s: float(s.get("revenue_estimate", 0) or 0), reverse=True)
+
         print("[orchestrator] " + str(len(today_slots)) + " slot(s) today (" + date.today().isoformat() + ")")
         if not today_slots:
             return
