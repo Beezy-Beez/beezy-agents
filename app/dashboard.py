@@ -21,6 +21,8 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
+import httpx
+import httpx
 
 NY = ZoneInfo("America/New_York")
 MONTHLY_GOAL = 150_000
@@ -34,30 +36,68 @@ def _get_conn():
 
 
 def _pacing_data() -> dict:
+    """Pull LIVE revenue from Klaviyo campaign + flow reports for the current month."""
     today = date.today()
     month_start = today.replace(day=1)
     days_elapsed = (today - month_start).days + 1
     days_in_month = 30
 
-    with _get_conn() as conn:
-        row = conn.execute(
-            """SELECT COALESCE(SUM(actual_revenue), 0), COUNT(*)
-               FROM calendar_executions
-               WHERE slot_date BETWEEN %s AND %s
-               AND status IN ('dispatched','completed')""",
-            (month_start, today)
-        ).fetchone()
+    headers = {
+        "Authorization": "Klaviyo-API-Key " + os.environ.get("KLAVIYO_API_KEY", ""),
+        "revision": "2025-10-15",
+        "Content-Type": "application/json",
+    }
+    start_iso = month_start.isoformat() + "T00:00:00"
+    end_iso = today.isoformat() + "T23:59:59"
+    campaign_rev = 0.0
+    flow_rev = 0.0
+    campaign_count = 0
 
-    revenue = float(row[0]) if row else 0
-    campaigns = int(row[1]) if row else 0
+    # Pull campaign revenue MTD
+    try:
+        resp = httpx.post("https://a.klaviyo.com/api/campaign-values-reports/", headers=headers, timeout=30, json={
+            "data": {"type": "campaign-values-report", "attributes": {
+                "statistics": ["recipients"],
+                "value_statistics": ["conversion_value"],
+                "timeframe": {"start": start_iso + "Z", "end": end_iso + "Z"},
+                "conversion_metric_id": "X93gjq",
+            }}
+        })
+        if resp.status_code == 200:
+            results = resp.json().get("data", {}).get("attributes", {}).get("results", [])
+            for r in results:
+                campaign_rev += float(r.get("statistics", {}).get("conversion_value", 0))
+                campaign_count += 1
+    except Exception as e:
+        print(f"[dashboard] campaign revenue pull failed: {e}")
+
+    # Pull flow revenue MTD
+    try:
+        resp = httpx.post("https://a.klaviyo.com/api/flow-values-reports/", headers=headers, timeout=30, json={
+            "data": {"type": "flow-values-report", "attributes": {
+                "statistics": ["recipients"],
+                "value_statistics": ["conversion_value"],
+                "timeframe": {"start": start_iso + "Z", "end": end_iso + "Z"},
+                "conversion_metric_id": "X93gjq",
+            }}
+        })
+        if resp.status_code == 200:
+            agg = resp.json().get("data", {}).get("attributes", {}).get("flow_aggregation", [])
+            for f in agg:
+                flow_rev += float(f.get("statistics", {}).get("conversion_value", 0))
+    except Exception as e:
+        print(f"[dashboard] flow revenue pull failed: {e}")
+
+    revenue = campaign_rev + flow_rev
     pct = revenue / MONTHLY_GOAL * 100
     days_left = max(days_in_month - days_elapsed, 1)
     daily_needed = (MONTHLY_GOAL - revenue) / days_left
 
     return {
         "revenue": revenue, "goal": MONTHLY_GOAL, "pct": pct,
-        "campaigns": campaigns, "days_elapsed": days_elapsed,
+        "campaigns": campaign_count, "days_elapsed": days_elapsed,
         "days_left": days_left, "daily_needed": daily_needed,
+        "campaign_rev": campaign_rev, "flow_rev": flow_rev,
     }
 
 
@@ -217,7 +257,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div class="pacing-stats" style="margin-top:20px;">
     <div class="stat"><div class="stat-value">${revenue:,.0f}</div><div class="stat-label">Revenue MTD</div></div>
-    <div class="stat"><div class="stat-value">{campaigns}</div><div class="stat-label">Campaigns sent</div></div>
+    <div class="stat"><div class="stat-value">${campaign_rev:,.0f} / ${flow_rev:,.0f}</div><div class="stat-label">Campaigns / Flows</div></div>
     <div class="stat"><div class="stat-value">${daily_needed:,.0f}</div><div class="stat-label">Daily needed</div></div>
     <div class="stat"><div class="stat-value">{days_left}d</div><div class="stat-label">Days left</div></div>
   </div>
@@ -376,6 +416,8 @@ async def dashboard():
         revenue=pacing["revenue"],
         campaigns=pacing["campaigns"],
         daily_needed=pacing["daily_needed"],
+        campaign_rev=pacing.get("campaign_rev", 0),
+        flow_rev=pacing.get("flow_rev", 0),
         days_left=pacing["days_left"],
         today_html=_render_today(today_camps),
         week_html=_render_week(week_perf),
