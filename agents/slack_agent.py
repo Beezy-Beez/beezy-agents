@@ -232,6 +232,7 @@ HELP_TEXT = """*Beezy Agent Commands* — type any of these in #beezy-agents:
 `approved week` — approve the next 7 days\n`approved today` — approve just today\n`approved may 20` — approve a specific date
 `generate calendar` — regenerate this month's calendar
 `run weekly brief` — post next 7 days to Slack now
+`calendar` — view this month's calendar
 
 *Conversational edits (just describe what you want):*
 "add 2 more SMS campaigns this month targeting VIPs"
@@ -534,10 +535,10 @@ def _process_beezy_agents(conn) -> None:
 
         # Skip bot's own messages and system messages
         if subtype or user == bot_id or not text:
-            _save_last_read_ts(conn, "beezy_agents", ts)
             continue
+
+        # Save timestamp IMMEDIATELY — prevents re-processing on next poll tick
         _save_last_read_ts(conn, "beezy_agents", ts)
-       
 
         print(f"[slack_agent] Message from {user}: {text[:80]}")
 
@@ -588,7 +589,6 @@ def _process_beezy_agents(conn) -> None:
             print(f"[slack_agent] Error processing message: {e}")
             _post_message(BEEZY_AGENTS_CHANNEL, "❌ Something went wrong: " + str(e)[:200])
 
-        _save_last_read_ts(conn, "beezy_agents", ts)
 
 
 def _process_new_episodes(conn) -> None:
