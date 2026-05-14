@@ -1,31 +1,14 @@
-"""Central config: load .env and expose typed accessors."""
-
+"""Central config — reads from environment variables (Replit Secrets)."""
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
-
-
-def _required(name: str) -> str:
-    val = os.getenv(name)
-    if not val:
-        raise RuntimeError(f"Missing required env var: {name}")
-    return val
-
-
-def _optional(name: str, default: str = "") -> str:
-    return os.getenv(name, default)
-
-
-DATABASE_URL = _optional("DATABASE_URL")
-ANTHROPIC_API_KEY = _optional("ANTHROPIC_API_KEY")
-SLACK_WEBHOOK_URL = _optional("SLACK_WEBHOOK_URL")
-SLACK_SIGNING_SECRET = _optional("SLACK_SIGNING_SECRET")
-
-KLAVIYO_API_KEY = _optional("KLAVIYO_API_KEY")
-SHOPIFY_SHOP_DOMAIN = _optional("SHOPIFY_SHOP_DOMAIN")
-SHOPIFY_ACCESS_TOKEN = _optional("SHOPIFY_ACCESS_TOKEN")
-GSC_CREDENTIALS_JSON = _optional("GSC_CREDENTIALS_JSON")
-
-OVERSEER_MODEL = _optional("OVERSEER_MODEL", "claude-opus-4-7")
-AGENT_MODEL = _optional("AGENT_MODEL", "claude-sonnet-4-6")
+DATABASE_URL          = os.environ.get("DATABASE_URL", "")
+KLAVIYO_API_KEY       = os.environ.get("KLAVIYO_API_KEY", "")
+KLAVIYO_FROM_EMAIL    = os.environ.get("KLAVIYO_FROM_EMAIL", "help@trybeezybeez.com")
+ANTHROPIC_API_KEY     = os.environ.get("BEEZY_ANTHROPIC_API_KEY", "")
+SHOPIFY_SHOP_DOMAIN   = os.environ.get("SHOPIFY_SHOP_DOMAIN", "trybeezybeez.myshopify.com")
+SHOPIFY_ACCESS_TOKEN  = os.environ.get("SHOPIFY_ACCESS_TOKEN", "")
+HIGGSFIELD_KEY        = os.environ.get("HIGGSFIELD_KEY", "")
+HIGGSFIELD_SECRET     = os.environ.get("HIGGSFIELD_SECRET", "")
+SLACK_BOT_TOKEN       = os.environ.get("SLACK_BOT_TOKEN", "")
+SLACK_WEBHOOK_URL     = os.environ.get("SLACK_WEBHOOK_URL", "")
+REPLIT_DOMAIN         = os.environ.get("REPLIT_DOMAIN", "beezy-agents-ingestion.replit.app")

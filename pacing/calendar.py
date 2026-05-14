@@ -271,6 +271,43 @@ def _build_context(month_start: date) -> str:
         "DOES NOT EXIST: ashwagandha honey, wildflower honey, lavender honey, manuka honey."
     )
     ctx["segment_rpr_data"] = seg_data.get("context_text", "")
+
+    # Subject pattern learning — bias Opus toward winning subject type per audience
+    try:
+        from db.connection import get_conn as _gc
+        with _gc() as _c:
+            _sp_row = _c.execute("SELECT value FROM agent_state WHERE key='subject_patterns'").fetchone()
+        if _sp_row:
+            import json as _json
+            _patterns = _json.loads(_sp_row[0])
+            subject_guidance = {}
+            for aud, data in _patterns.items():
+                wt = data.get("winning_type")
+                if wt:
+                    subject_guidance[aud] = f"Use {wt}-style subjects (data-backed winner)"
+                else:
+                    # Show counts so Opus can see which types have been tested
+                    c_cnt = data.get("curiosity", {}).get("count", 0)
+                    b_cnt = data.get("benefit", {}).get("count", 0)
+                    if c_cnt + b_cnt >= 3:
+                        subject_guidance[aud] = f"A/B testing: {c_cnt} curiosity vs {b_cnt} benefit sends, no winner yet"
+            if subject_guidance:
+                ctx["subject_type_guidance"] = subject_guidance
+    except Exception:
+        pass
+
+    # Content pillar attribution — show which topic angles drive best RPR
+    try:
+        from pacing.brain import content_strategy_attribution
+        pillars = content_strategy_attribution(days=90)
+        if pillars:
+            ctx["content_pillar_performance_90d"] = {
+                p: {"sends": d["sends"], "avg_rpr": d["avg_rpr"], "total_rev": d["total_revenue"]}
+                for p, d in sorted(pillars.items(), key=lambda x: -x[1]["avg_rpr"])
+            }
+    except Exception:
+        pass
+
     return json.dumps(ctx, indent=2, default=str)
 
 

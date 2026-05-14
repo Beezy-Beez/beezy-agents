@@ -20,6 +20,8 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import httpx
+
 NY = ZoneInfo("America/New_York")
 
 # ── Segment classification ─────────────────────────────────────────────────────
@@ -166,28 +168,215 @@ def _r8_daily_cadence(conn, slot: dict) -> dict:
             "detail": f"{count}/3 sends today" + ("" if passed else " — LIMIT REACHED")}
 
 
+# Audiences that share significant profile overlap (supersets/subsets or heavy intersection)
+_OVERLAP_GROUPS: list[set] = [
+    # All customer tiers feed up to all_customers
+    {"vip", "inner_circle", "whales", "high_aov", "engaged_customers",
+     "active_seal", "active_subscribers", "all_customers",
+     "one_time_buyers", "otb"},
+    # Lapsed customers are also in all_customers historical pool
+    {"lapsed_30d", "lapsed_60d", "all_customers"},
+    {"lapsed_60_90d", "lapsed_90d", "all_customers"},
+    {"lapsed_90_180d", "lapsed_180d", "lapsed_180d_plus", "winback_180d", "all_customers"},
+    # Prospect tiers share a pool of unsubscribed/trial contacts
+    {"engaged_prospects", "super_engaged"},
+]
+
+# Flow trigger types that indicate profiles in a given audience are actively in the flow
+_FLOW_TRIGGER_AUDIENCE: dict[str, set] = {
+    "Added to List":        {"super_engaged", "engaged_prospects"},
+    "Viewed Product":       {"engaged_prospects", "super_engaged"},
+    "Started Checkout":     {"cart_abandoners"},
+    "Checkout Started":     {"cart_abandoners"},
+    "Placed Order":         {"one_time_buyers", "otb", "active_seal", "active_subscribers"},
+}
+
+# RPR and open-rate floors for R11 — any audience below these fails
+_R11_RPR_FLOOR = 0.10
+_R11_OR_FLOOR  = 0.25
+
+
 def _r9_segment_overlap(conn, slot: dict) -> dict:
-    """R9: Segment overlap — same-day audiences must not overlap without exclusions."""
-    return {"rule": "R9", "name": "Segment overlap (same day)", "pass": True,
-            "detail": "STUB — overlap audit not automated yet. Check manually."}
+    """R9: Same-day segment overlap — check if today's dispatched audiences share profiles."""
+    audience = (slot.get("audience") or "").lower().replace(" ", "_")
+    today = date.today()
+    rows = conn.execute(
+        "SELECT DISTINCT audience FROM calendar_executions "
+        "WHERE slot_date = %s AND status IN ('dispatched','completed')",
+        (today,)
+    ).fetchall()
+    dispatched = {(r[0] or "").lower().replace(" ", "_") for r in rows}
+
+    for group in _OVERLAP_GROUPS:
+        if audience in group:
+            conflicts = (dispatched & group) - {audience}
+            if conflicts:
+                return {
+                    "rule": "R9", "name": "Segment overlap (same day)", "pass": False,
+                    "detail": (
+                        f"'{audience}' overlaps with today's sends to "
+                        f"{sorted(conflicts)}. Add exclusions in Klaviyo."
+                    ),
+                }
+    return {
+        "rule": "R9", "name": "Segment overlap (same day)", "pass": True,
+        "detail": f"No same-day overlap with {sorted(dispatched) or 'no sends today'}",
+    }
 
 
 def _r10_active_flow_overlap(slot: dict) -> dict:
-    """R10: Active Flow overlap. STUB — requires Klaviyo flow API pull."""
-    return {"rule": "R10", "name": "Active Flow overlap", "pass": True,
-            "detail": "STUB — flow overlap check not automated yet"}
+    """R10: Check whether live Klaviyo flows would double-touch the proposed audience within 72h."""
+    audience = (slot.get("audience") or "").lower().replace(" ", "_")
+    api_key = os.environ.get("KLAVIYO_API_KEY", "")
+    if not api_key:
+        return {
+            "rule": "R10", "name": "Active Flow overlap", "pass": True,
+            "detail": "No KLAVIYO_API_KEY — skipping flow overlap check",
+        }
+    try:
+        resp = httpx.get(
+            "https://a.klaviyo.com/api/flows",
+            headers={"Authorization": f"Klaviyo-API-Key {api_key}", "revision": "2025-10-15"},
+            params={"filter": 'equals(status,"live")', "fields[flow]": "name,trigger_type"},
+            timeout=15,
+        )
+        if not resp.is_success:
+            return {
+                "rule": "R10", "name": "Active Flow overlap", "pass": True,
+                "detail": f"Klaviyo API {resp.status_code} — skipping flow overlap check",
+            }
+        live_flows = resp.json().get("data", [])
+    except Exception as exc:
+        return {
+            "rule": "R10", "name": "Active Flow overlap", "pass": True,
+            "detail": f"Flow API error ({exc}) — skipping check",
+        }
+
+    conflicts = []
+    for flow in live_flows:
+        attrs = flow.get("attributes") or {}
+        trigger = attrs.get("trigger_type") or ""
+        name    = attrs.get("name") or trigger
+        targeted = _FLOW_TRIGGER_AUDIENCE.get(trigger, set())
+        if audience in targeted:
+            conflicts.append(name)
+
+    if conflicts:
+        return {
+            "rule": "R10", "name": "Active Flow overlap", "pass": False,
+            "detail": (
+                f"'{audience}' is targeted by live flow(s): {conflicts[:3]}. "
+                "Risk of double-touch within 72h."
+            ),
+        }
+    return {
+        "rule": "R10", "name": "Active Flow overlap", "pass": True,
+        "detail": f"{len(live_flows)} live flows — no overlap with '{audience}'",
+    }
 
 
-def _r11_performance_benchmark(slot: dict) -> dict:
-    """R11: Performance benchmark gate. STUB — requires historical aggregation."""
-    return {"rule": "R11", "name": "Top-1% benchmark", "pass": True,
-            "detail": "STUB — benchmark projection not automated yet"}
+def _r11_performance_benchmark(conn, slot: dict) -> dict:
+    """R11: Fail if 90d RPR < $0.10 or open rate < 25% (requires ≥3 finalized sends)."""
+    audience = (slot.get("audience") or "").lower().replace(" ", "_")
+
+    row = conn.execute(
+        """SELECT COUNT(*), AVG(actual_rpr)
+           FROM calendar_executions
+           WHERE audience = %s
+             AND slot_date > CURRENT_DATE - INTERVAL '90 days'
+             AND status IN ('dispatched','completed')
+             AND actual_rpr > 0""",
+        (audience,)
+    ).fetchone()
+    sends, avg_rpr = int(row[0] or 0), float(row[1] or 0)
+
+    if sends < 3:
+        return {
+            "rule": "R11", "name": "Top-1% benchmark", "pass": True,
+            "detail": f"Only {sends} finalized send(s) in 90d — insufficient data, skipping floor",
+        }
+
+    # Open rate from performance table joined via klaviyo_campaign_id
+    or_row = conn.execute(
+        """SELECT AVG(opens.metric_value::float / NULLIF(recip.metric_value::float, 0))
+           FROM calendar_executions ce
+           JOIN performance opens  ON opens.dimensions->>'entity_id' = ce.klaviyo_campaign_id
+                                  AND opens.metric_name = 'opens'
+           JOIN performance recip  ON recip.dimensions->>'entity_id' = ce.klaviyo_campaign_id
+                                  AND recip.metric_name = 'recipients'
+           WHERE ce.audience = %s
+             AND ce.slot_date > CURRENT_DATE - INTERVAL '90 days'
+             AND ce.status IN ('dispatched','completed')
+             AND ce.klaviyo_campaign_id IS NOT NULL""",
+        (audience,)
+    ).fetchone()
+    avg_or = float(or_row[0]) if or_row and or_row[0] is not None else None
+
+    failures = []
+    if avg_rpr < _R11_RPR_FLOOR:
+        failures.append(f"RPR ${avg_rpr:.4f} < floor ${_R11_RPR_FLOOR:.2f}")
+    if avg_or is not None and avg_or < _R11_OR_FLOOR:
+        failures.append(f"OR {avg_or:.1%} < floor {_R11_OR_FLOOR:.0%}")
+
+    if failures:
+        return {
+            "rule": "R11", "name": "Top-1% benchmark", "pass": False,
+            "detail": f"{sends} sends: {' | '.join(failures)} — audience underperforms benchmark",
+        }
+    or_str = f"{avg_or:.1%}" if avg_or is not None else "OR n/a"
+    return {
+        "rule": "R11", "name": "Top-1% benchmark", "pass": True,
+        "detail": f"{sends} sends: ${avg_rpr:.4f} RPR, {or_str} — meets floors",
+    }
 
 
-def _r12_image_vs_plain(slot: dict) -> dict:
-    """R12: Image vs plain text data-backed. STUB."""
-    return {"rule": "R12", "name": "Format (image/plain) data-backed", "pass": True,
-            "detail": "STUB — format performance comparison not automated yet"}
+def _r12_image_vs_plain(conn, slot: dict) -> dict:
+    """R12: Compare RPR by content_type in last 90d; warn if proposed format underperforms best."""
+    audience     = (slot.get("audience") or "").lower().replace(" ", "_")
+    content_type = (slot.get("content_type") or "").lower()
+
+    rows = conn.execute(
+        """SELECT content_type, AVG(actual_rpr), COUNT(*)
+           FROM calendar_executions
+           WHERE audience = %s
+             AND slot_date > CURRENT_DATE - INTERVAL '90 days'
+             AND status IN ('dispatched','completed')
+             AND actual_rpr > 0
+           GROUP BY content_type
+           HAVING COUNT(*) >= 2
+           ORDER BY AVG(actual_rpr) DESC""",
+        (audience,)
+    ).fetchall()
+
+    if not rows:
+        return {
+            "rule": "R12", "name": "Format (image/plain) data-backed", "pass": True,
+            "detail": "Insufficient 90d data (need ≥2 sends per format) — skipping format check",
+        }
+
+    best_ct, best_rpr = rows[0][0], float(rows[0][1])
+    current_rpr = next((float(r[1]) for r in rows if r[0] == content_type), None)
+
+    if current_rpr is None:
+        top = " | ".join(f"{r[0]}: ${float(r[1]):.4f}" for r in rows[:3])
+        return {
+            "rule": "R12", "name": "Format (image/plain) data-backed", "pass": True,
+            "detail": f"No 90d data for '{content_type}'. Known formats: {top}",
+        }
+
+    if len(rows) == 1 or current_rpr >= best_rpr * 0.70:
+        return {
+            "rule": "R12", "name": "Format (image/plain) data-backed", "pass": True,
+            "detail": f"'{content_type}' ${current_rpr:.4f} RPR vs best '{best_ct}' ${best_rpr:.4f} — acceptable",
+        }
+
+    return {
+        "rule": "R12", "name": "Format (image/plain) data-backed", "pass": False,
+        "detail": (
+            f"'{content_type}' RPR ${current_rpr:.4f} is <70% of best format "
+            f"'{best_ct}' ${best_rpr:.4f}. Switch to '{best_ct}' for this audience."
+        ),
+    }
 
 
 # ── Content validation (catches today's bugs) ─────────────────────────────────
@@ -284,8 +473,8 @@ def validate_campaign(conn, slot: dict, copy: dict, cta_url: str) -> dict:
     results.append(_r8_daily_cadence(conn, slot))
     results.append(_r9_segment_overlap(conn, slot))
     results.append(_r10_active_flow_overlap(slot))
-    results.append(_r11_performance_benchmark(slot))
-    results.append(_r12_image_vs_plain(slot))
+    results.append(_r11_performance_benchmark(conn, slot))
+    results.append(_r12_image_vs_plain(conn, slot))
 
     # Content checks (catch the bugs from today)
     results.append(_check_subject_syntax(copy))

@@ -35,18 +35,20 @@ def refresh_pacing_cache():
             }}
         })
         if resp.status_code == 200:
-            for f in resp.json().get("data", {}).get("attributes", {}).get("flow_aggregation", []):
-                flow_rev += float(f.get("statistics", {}).get("conversion_value", 0))
+            for r in resp.json().get("data", {}).get("attributes", {}).get("results", []):
+                flow_rev += float(r.get("statistics", {}).get("conversion_value", 0))
     except Exception as e:
         print(f"[pacing_cache] flow pull failed: {e}")
 
     from db.connection import get_conn
+    from datetime import datetime, timezone
     with get_conn() as conn:
         cache = json.dumps({
             "campaign_rev": campaign_rev,
             "flow_rev": flow_rev,
             "total": campaign_rev + flow_rev,
             "campaign_count": campaign_count,
+            "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         })
         conn.execute(
             "INSERT INTO agent_state (key, value, updated_at) VALUES ('pacing_cache', %s, NOW()) ON CONFLICT (key) DO UPDATE SET value = %s, updated_at = NOW()",

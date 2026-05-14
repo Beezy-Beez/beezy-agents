@@ -61,6 +61,21 @@ def _pacing() -> dict:
             as_of = d.get("as_of")
     except Exception:
         pass
+    # Fallback: compute from performance table when pacing_cache is stale/zero
+    if cr == 0:
+        r = _q1("""SELECT COALESCE(SUM(metric_value),0) FROM performance
+                   WHERE source='klaviyo' AND metric_name='conversion_value'
+                   AND dimensions->>'kind'='campaign'
+                   AND measured_at >= date_trunc('month', NOW())""")
+        if r:
+            cr = float(r[0] or 0)
+    if fr == 0:
+        r = _q1("""SELECT COALESCE(SUM(metric_value),0) FROM performance
+                   WHERE source='klaviyo' AND metric_name='conversion_value'
+                   AND dimensions->>'kind'='flow'
+                   AND measured_at >= date_trunc('month', NOW())""")
+        if r:
+            fr = float(r[0] or 0)
     rev = cr + fr
     pct = rev / MONTHLY_GOAL * 100 if MONTHLY_GOAL else 0
     daily_rate_actual = rev / days_elapsed if days_elapsed else 0
@@ -221,6 +236,47 @@ def _upcoming_slots(days=7) -> list:
     return result
 
 
+_REVERSE_SEG = {
+    "UEQD6k": "lapsed_30d", "UfARWm": "lapsed_60d", "XuS7rY": "lapsed_90d",
+    "W98qh3": "lapsed_180d", "RArtzN": "vip", "RvtHdn": "engaged_customers",
+    "UBFUcH": "active_seal", "VAUD58": "whales", "Xrp3ha": "engaged_prospects",
+    "Sme9Nq": "super_engaged", "QHV2s5": "inner_circle",
+    "Y6VSre": "hive_mind_prospects", "XFSxZt": "all_customers",
+}
+
+
+def _perf_rpr_by_audience() -> dict[str, float]:
+    """Compute avg RPR per audience from Klaviyo performance table via segment_ids."""
+    rows = _q(
+        """WITH cd AS (
+             SELECT dimensions->>'entity_id' as eid,
+                    MAX(CASE WHEN metric_name='conversion_value' THEN metric_value END) as rev,
+                    MAX(CASE WHEN metric_name='recipients' THEN metric_value END) as rcpt
+             FROM performance
+             WHERE source='klaviyo' AND metric_name IN ('conversion_value','recipients')
+               AND dimensions->>'kind'='campaign' AND dimensions->>'send_channel'='email'
+             GROUP BY dimensions->>'entity_id'
+           ),
+           segs AS (
+             SELECT cd.eid, cd.rev, cd.rcpt,
+                    jsonb_array_elements_text(p.dimensions->'segment_ids') as sid
+             FROM cd
+             JOIN performance p ON p.source='klaviyo' AND p.metric_name='conversion_value'
+               AND p.dimensions->>'entity_id'=cd.eid AND p.dimensions->>'kind'='campaign'
+             WHERE cd.rcpt > 0 AND cd.rev > 0
+           )
+           SELECT sid, AVG(rev / rcpt) as avg_rpr
+           FROM segs
+           GROUP BY sid"""
+    )
+    result = {}
+    for r in rows:
+        aud = _REVERSE_SEG.get(r[0])
+        if aud and r[1]:
+            result[aud] = float(r[1])
+    return result
+
+
 def _audience_health() -> list:
     # Try agent_state first (written by workers/audience_health.py once built)
     row = _q1("SELECT value FROM agent_state WHERE key='audience_health'")
@@ -229,7 +285,7 @@ def _audience_health() -> list:
             return json.loads(row[0])
         except Exception:
             pass
-    # Fallback: compute from calendar_executions
+    # Fallback: compute from calendar_executions + performance table for RPR
     today = date.today()
     rows = _q(
         """SELECT audience,
@@ -239,14 +295,17 @@ def _audience_health() -> list:
                   COUNT(*) FILTER (WHERE slot_date > CURRENT_DATE - 90 AND status IN ('dispatched','completed')) as sends_90d
            FROM calendar_executions
            WHERE status IN ('dispatched','completed') AND audience IS NOT NULL
+             AND audience NOT LIKE 'test_%%'
            GROUP BY audience
-           ORDER BY rpr_90d DESC"""
+           ORDER BY MAX(slot_date) DESC"""
     )
+    # Fallback RPR from Klaviyo performance (when actual_rpr not backfilled yet)
+    perf_rpr = _perf_rpr_by_audience()
     result = []
     for r in rows:
         audience = r[0]
         last_send = r[1]
-        rpr_90d = float(r[2] or 0)
+        rpr_90d = float(r[2] or 0) or perf_rpr.get(audience, 0)
         rpr_30d = float(r[3] or 0)
         sends_90d = int(r[4] or 0)
         days_since = (today - last_send).days if last_send else 999
@@ -265,7 +324,7 @@ def _audience_health() -> list:
             "sends_90d": sends_90d,
             "health": health,
         })
-    return result
+    return sorted(result, key=lambda x: -x["rpr_90d"])
 
 
 def _flow_health() -> dict | None:
@@ -286,8 +345,35 @@ def _top_performers() -> list:
         "FROM calendar_executions WHERE actual_revenue > 0 "
         "ORDER BY actual_revenue DESC LIMIT 10"
     )
-    return [{"a": r[0], "t": r[1], "rv": float(r[2] or 0), "rpr": float(r[3] or 0),
-             "d": str(r[4])} for r in rows]
+    if rows:
+        return [{"a": r[0], "t": r[1], "rv": float(r[2] or 0), "rpr": float(r[3] or 0),
+                 "d": str(r[4])} for r in rows]
+    # Fallback: read from Klaviyo performance table (ingested historical data)
+    rows = _q(
+        """SELECT cv.name, cv.revenue, COALESCE(rpr.rpr, 0) as rpr, cv.send_date
+           FROM (
+             SELECT dimensions->>'entity_name' as name,
+                    MAX(metric_value) as revenue,
+                    (MAX(dimensions->>'send_time'))::date as send_date,
+                    dimensions->>'entity_id' as eid
+             FROM performance
+             WHERE source='klaviyo' AND metric_name='conversion_value'
+               AND dimensions->>'kind'='campaign'
+               AND dimensions->>'send_channel'='email'
+             GROUP BY dimensions->>'entity_id', dimensions->>'entity_name'
+             HAVING MAX(metric_value) > 0
+           ) cv
+           LEFT JOIN (
+             SELECT dimensions->>'entity_id' as eid, AVG(metric_value) as rpr
+             FROM performance
+             WHERE source='klaviyo' AND metric_name='revenue_per_recipient'
+               AND dimensions->>'kind'='campaign'
+             GROUP BY dimensions->>'entity_id'
+           ) rpr ON rpr.eid = cv.eid
+           ORDER BY cv.revenue DESC LIMIT 10"""
+    )
+    return [{"a": (r[0] or "")[:40], "t": "klaviyo_campaign",
+             "rv": float(r[1] or 0), "rpr": float(r[2] or 0), "d": str(r[3] or "")} for r in rows]
 
 
 def _learning_loop() -> dict:
@@ -508,12 +594,21 @@ def _html_approval(apv: dict) -> str:
         <div class="approval-note">Or type <code>approved week</code> in #beezy-agents</div>"""
 
     plan_status = "✓ Calendar plan exists for this month" if apv["month_has_plan"] else "⚠ No calendar plan — type <code>generate calendar</code> in Slack"
+    month_approve_html = ""
+    if apv["month_has_plan"]:
+        month_approve_html = """
+        <form method="POST" action="/api/approve-month" style="margin-top:10px">
+          <button type="submit" class="btn-approve" style="background:#555;font-size:12px;padding:8px">
+            Approve All Weeks This Month
+          </button>
+        </form>"""
 
     return f"""
     <div class="card">
       <div class="card-title">Approval Center</div>
       {approval_html}
       <div class="plan-status">{plan_status}</div>
+      {month_approve_html}
     </div>"""
 
 

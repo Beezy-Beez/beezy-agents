@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import psycopg
 import config
 
+
 @contextmanager
 def get_conn():
     if not config.DATABASE_URL:
@@ -11,6 +12,7 @@ def get_conn():
         yield conn
     finally:
         conn.close()
+
 
 def raw_connect():
     if not config.DATABASE_URL:

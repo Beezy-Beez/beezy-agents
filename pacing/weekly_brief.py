@@ -79,6 +79,51 @@ CONTENT_EMOJI = {
     "flow_experiment":  "🔬",
 }
 
+CONTENT_LABEL = {
+    "klaviyo_campaign": "Email",
+    "sniper_followup":  "Follow-up email",
+    "hive_mind":        "Hive Mind newsletter",
+    "seo_blog":         "SEO blog post",
+    "sleep_audio":      "Sleep audio episode",
+    "sms_campaign":     "SMS",
+    "flow_experiment":  "Flow experiment",
+}
+
+AUDIENCE_LABEL = {
+    "lapsed_30d":          "Lapsed 30d customers",
+    "lapsed_60d":          "Lapsed 60d customers",
+    "lapsed_90d":          "Lapsed 90d customers",
+    "lapsed_180d":         "Lapsed 180d customers",
+    "lapsed_90_180d":      "Lapsed 90–180d customers",
+    "lapsed_180d_plus":    "Lapsed 180d+ customers",
+    "winback_180d":        "Winback list",
+    "vip":                 "VIP customers",
+    "inner_circle":        "Inner Circle",
+    "whales":              "Whales",
+    "high_aov":            "High-AOV customers",
+    "engaged_customers":   "Engaged customers",
+    "all_customers":       "All customers",
+    "active_seal":         "Active Seal members",
+    "active_subscribers":  "Active subscribers",
+    "one_time_buyers":     "One-time buyers",
+    "otb":                 "One-time buyers",
+    "cart_abandoners":     "Cart abandoners",
+    "engaged_prospects":   "Engaged prospects",
+    "super_engaged":       "Super engaged prospects",
+    "hive_mind_prospects": "Hive Mind prospects",
+}
+
+
+def _fmt_time(t: str) -> str:
+    """Convert '14:00' → '2:00pm', '08:15' → '8:15am'."""
+    try:
+        h, m = int(t[:2]), int(t[3:5])
+        suffix = "am" if h < 12 else "pm"
+        h12 = h % 12 or 12
+        return (str(h12) + ":" + f"{m:02d}" + suffix) if m else (str(h12) + suffix)
+    except Exception:
+        return t
+
 
 def run_weekly_brief() -> None:
     today      = date.today()
@@ -106,8 +151,6 @@ def run_weekly_brief() -> None:
         token = _approval_token(week_start)
         _insert_pending(conn, week_start, token)
 
-    approval_url = "https://" + REPLIT_DOMAIN + "/api/approve-week/" + week_start.isoformat() + "?token=" + token
-
     # Build slot lines grouped by day
     by_day: dict[str, list[dict]] = {}
     for s in slots:
@@ -118,24 +161,27 @@ def run_weekly_brief() -> None:
     total_rev = 0
     for d in sorted(by_day.keys()):
         day_slots = by_day[d]
-        day_label = date.fromisoformat(d).strftime("%a %b %d")
+        day_label = date.fromisoformat(d).strftime("%A, %b %d")
         body_lines.append("*" + day_label + "*")
         for s in day_slots:
-            ct    = s.get("content_type","?")
-            emoji = CONTENT_EMOJI.get(ct, "•")
-            rev   = s.get("revenue_estimate", 0)
-            if ct not in ("seo_blog","flow_experiment"):
+            ct      = s.get("content_type", "?")
+            emoji   = CONTENT_EMOJI.get(ct, "•")
+            label   = CONTENT_LABEL.get(ct, ct)
+            aud_raw = s.get("audience", "")
+            aud     = AUDIENCE_LABEL.get(aud_raw, aud_raw.replace("_", " ").title()) if aud_raw else ""
+            topic   = s.get("topic_angle", "")[:70]
+            tm      = _fmt_time(s.get("send_time_est", "?"))
+            rev     = float(s.get("revenue_estimate", 0) or 0)
+            if ct not in ("seo_blog", "flow_experiment"):
                 total_rev += rev
-            rev_str = "$" + str(int(rev)) if rev else "--"
-            body_lines.append(
-                "  " + emoji + " " + s.get("send_time_est","?") + " EST  "
-                + ct + "  |  " + s.get("audience","?") + "  |  "
-                + s.get("topic_angle","")[:60] + "  |  rev:" + rev_str
-                + "  |  " + s.get("priority","?")
-            )
+            rev_str  = f"est. ${rev:,.0f}" if rev else ""
+            aud_part = f" → {aud}" if aud else ""
+            rev_part = f"  ·  {rev_str}" if rev_str else ""
+            topic_part = f'  "{topic}"' if topic else ""
+            body_lines.append(f"  {emoji} {tm}{aud_part}{topic_part}{rev_part}")
         body_lines.append("")
 
-    body_lines.append("*Projected revenue this week:* $" + str(int(total_rev)))
+    body_lines.append(f"*Projected revenue this week: ${total_rev:,.0f}*")
     body_lines.append("")
     body_lines.append("✅ *To approve, simply type:* `approved week`")
     body_lines.append("_Or click the Approve button on the dashboard._")

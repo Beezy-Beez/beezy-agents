@@ -176,6 +176,37 @@ def _assign_template(message_id: str, template_id: str) -> None:
     })
 
 
+def auto_create_pending() -> str:
+    """
+    Called at 10am cron. Finds all issues with status='draft', creates a Klaviyo
+    campaign for each, and posts a single Slack summary.
+
+    Returns a short summary string for logging.
+    """
+    with psycopg.connect(DATABASE_URL) as conn:
+        rows = conn.execute(
+            "SELECT number FROM issues WHERE status = 'draft' ORDER BY number ASC LIMIT 5"
+        ).fetchall()
+
+    if not rows:
+        print("[auto_create] No draft issues — nothing to do.")
+        return "no_pending"
+
+    results: list[str] = []
+    for (number,) in rows:
+        try:
+            out = create_campaign_for_issue(number)
+            results.append(f"Issue {number:03d} ✅ — campaign {out['campaign_id'][:12]}…")
+        except Exception as exc:
+            msg = str(exc)[:100]
+            results.append(f"Issue {number:03d} ❌ — {msg}")
+            print(f"[auto_create] Issue {number} failed: {exc}")
+
+    summary = "\n".join(results)
+    print(f"[auto_create] Done:\n{summary}")
+    return summary
+
+
 def create_campaign_for_issue(issue_number: int) -> dict:
     """
     Full campaign creation flow for one Hive Mind issue.

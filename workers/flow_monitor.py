@@ -7,9 +7,16 @@ Flags: zero-revenue flows, underperforming welcome series, broken triggers,
 high-engagement-no-conversion anomalies.
 Posts actionable recommendations to Slack.
 
+Also exports `fix_flow(analysis)`:
+  For zero-revenue flows with >50 recipients, generates new email copy via the
+  Anthropic API, creates a new Klaviyo template, and posts to Slack with a
+  one-click "Apply Fix" button. The button triggers POST /api/slack/interactive
+  which applies the template to the flow message.
+
 Usage:
-    from workers.flow_monitor import run_flow_check
+    from workers.flow_monitor import run_flow_check, fix_flow
     run_flow_check()
+    fix_flow(analysis_dict)
 """
 from __future__ import annotations
 
@@ -312,3 +319,194 @@ def run_flow_check() -> str:
 
     print(f"[flow_monitor] Done. {len(critical)} critical, {len(warns)} warnings.")
     return report
+
+
+# ── Flow fix: generate copy → create template → post Slack approval ───────────
+
+_FIX_SYSTEM = (
+    "You are a high-converting email copywriter for Beezy Beez Honey "
+    "(trybeezybeez.com), a DTC CBN/CBD honey brand for women 50+ seeking better sleep. "
+    "Brand voice: warm, science-backed, empowering. "
+    "You are rewriting a triggered flow email that has ZERO revenue despite real recipients. "
+    "The goal: fix the subject line, preview, and body so it drives click-throughs to buy. "
+    "Rules: compelling subject (≤60 chars), emotional preview (≤90 chars), "
+    "2–3 short body paragraphs, clear CTA button text (4–6 words). "
+    "Output ONLY valid JSON. Schema: "
+    '{"subject":"...","preview_text":"...","body_html":"<p>...</p>","cta_text":"..."}'
+)
+
+
+def _generate_fix_copy(flow_name: str, flow_type: str) -> dict:
+    """Call Anthropic to generate replacement email copy for a zero-revenue flow."""
+    import anthropic as _anthropic
+
+    key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("BEEZY_ANTHROPIC_API_KEY", "")
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set.")
+    client = _anthropic.Anthropic(api_key=key)
+    msg = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1500,
+        system=_FIX_SYSTEM,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Flow name: {flow_name}\n"
+                f"Flow type: {flow_type}\n"
+                "Problem: zero revenue despite real recipients. "
+                "Rewrite the email to drive purchases of Beezy Beez Honey CBN sleep blend."
+            ),
+        }],
+    )
+    raw = msg.content[0].text.strip()
+    s, e = raw.find("{"), raw.rfind("}")
+    return json.loads(raw[s : e + 1] if s != -1 else raw)
+
+
+def _build_flow_email_html(copy: dict, flow_name: str) -> str:
+    """Wrap generated copy in a minimal branded HTML template."""
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{copy.get('subject','')}</title>
+</head>
+<body style="margin:0;padding:0;background:#fffdf7;font-family:Georgia,serif;">
+<div style="max-width:600px;margin:0 auto;padding:32px 24px;">
+  <p style="font-size:13px;color:#8b6914;text-align:center;margin-bottom:24px;">
+    Beezy Beez Honey · CBN Sleep Blend
+  </p>
+  <div style="background:#fff;border-radius:8px;padding:32px;border:1px solid #f0e8d0;">
+    {copy.get('body_html','')}
+    <div style="text-align:center;margin-top:32px;">
+      <a href="https://trybeezybeez.com/pages/bf-collection"
+         style="background:#8b4513;color:#fff;padding:14px 32px;border-radius:6px;
+                text-decoration:none;font-size:16px;font-weight:bold;display:inline-block;">
+        {copy.get('cta_text','Shop Now')}
+      </a>
+    </div>
+  </div>
+  <p style="font-size:11px;color:#999;text-align:center;margin-top:24px;">
+    © Beezy Beez Honey · {{{{ organization.address }}}}
+    · <a href="{{ unsubscribe_url }}" style="color:#999;">Unsubscribe</a>
+  </p>
+</div></body></html>"""
+
+
+def _create_klaviyo_template(name: str, html: str) -> str:
+    """Create a new Klaviyo email template. Returns template_id."""
+    api_key = os.environ.get("KLAVIYO_API_KEY", "")
+    resp = httpx.post(
+        "https://a.klaviyo.com/api/templates/",
+        headers=_klaviyo_headers(),
+        json={"data": {
+            "type": "template",
+            "attributes": {"name": name, "html": html, "editor_type": "CODE"},
+        }},
+        timeout=30,
+    )
+    if not resp.is_success:
+        raise RuntimeError(f"Klaviyo create template {resp.status_code}: {resp.text[:300]}")
+    return resp.json()["data"]["id"]
+
+
+def _get_flow_message_ids(flow_id: str) -> list[str]:
+    """Return all flow message IDs for a flow (for apply-fix routing)."""
+    resp = httpx.get(
+        f"https://a.klaviyo.com/api/flows/{flow_id}/flow-messages/",
+        headers=_klaviyo_headers(),
+        params={"fields[flow-message]": "id"},
+        timeout=20,
+    )
+    if not resp.is_success:
+        return []
+    return [item["id"] for item in resp.json().get("data", [])]
+
+
+def fix_flow(analysis: dict) -> dict:
+    """
+    For a zero-revenue flow with >50 recipients:
+      1. Generate replacement email copy via Anthropic.
+      2. Create a new Klaviyo template with the copy.
+      3. Post a Slack message with an "Apply Fix" button.
+
+    The Slack button value encodes `template_id:flow_id` so the interactive
+    endpoint at POST /api/slack/interactive can apply it on click.
+
+    Returns {template_id, flow_id, skipped: bool}.
+    """
+    from lib.slack import _post as slack_post
+
+    flow_id    = analysis.get("flow_id", "")
+    flow_name  = analysis.get("name", flow_id)
+    flow_type  = analysis.get("flow_type", "default")
+    recipients = analysis.get("recipients", 0)
+    revenue    = analysis.get("revenue", 0)
+
+    if not (recipients > 50 and revenue == 0):
+        return {"skipped": True, "reason": "Criteria not met (need >50 recip + $0 revenue)"}
+
+    print(f"[fix_flow] Generating fix copy for: {flow_name}")
+    copy = _generate_fix_copy(flow_name, flow_type)
+
+    html         = _build_flow_email_html(copy, flow_name)
+    template_name = f"[AUTO-FIX] {flow_name[:60]} — {date.today().isoformat()}"
+    template_id  = _create_klaviyo_template(template_name, html)
+    print(f"[fix_flow]   Created template: {template_id}")
+
+    button_value = f"{template_id}:{flow_id}"
+    admin_url    = f"https://www.klaviyo.com/flow/{flow_id}/edit"
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "🔧 Flow Fix Ready for Review"},
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Flow:* {flow_name}\n"
+                    f"*Problem:* {recipients} recipients, $0 revenue in 30d\n"
+                    f"*Fix:* New template created — `{template_id}`\n\n"
+                    f"*New subject:* {copy.get('subject','')}\n"
+                    f"*Preview:* {copy.get('preview_text','')}"
+                ),
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "✅ Apply Fix to Flow"},
+                    "style": "primary",
+                    "action_id": "apply_flow_fix",
+                    "value": button_value,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "🔍 View Flow"},
+                    "url": admin_url,
+                    "action_id": "view_flow",
+                    "value": flow_id,
+                },
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn",
+                          "text": f"Template ID: `{template_id}` · Flow: `{flow_id}`"}],
+        },
+    ]
+
+    slack_post({"blocks": blocks})
+    print(f"[fix_flow]   Posted Slack approval for {flow_name}")
+
+    return {
+        "template_id": template_id,
+        "flow_id":     flow_id,
+        "flow_name":   flow_name,
+        "subject":     copy.get("subject", ""),
+        "skipped":     False,
+    }

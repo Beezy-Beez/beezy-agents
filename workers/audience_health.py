@@ -16,6 +16,15 @@ from datetime import date, timedelta
 
 from db.connection import get_conn
 
+# Reverse map: Klaviyo segment ID → internal audience name
+_REVERSE_SEG = {
+    "UEQD6k": "lapsed_30d", "UfARWm": "lapsed_60d", "XuS7rY": "lapsed_90d",
+    "W98qh3": "lapsed_180d", "RArtzN": "vip", "RvtHdn": "engaged_customers",
+    "UBFUcH": "active_seal", "VAUD58": "whales", "Xrp3ha": "engaged_prospects",
+    "Sme9Nq": "super_engaged", "QHV2s5": "inner_circle",
+    "Y6VSre": "hive_mind_prospects", "XFSxZt": "all_customers",
+}
+
 CUSTOMER_SEGMENTS = {
     "lapsed_30d", "lapsed_60d", "lapsed_60_90d", "lapsed_90d", "lapsed_90_180d",
     "lapsed_180d", "lapsed_180d_plus", "winback_180d",
@@ -33,6 +42,41 @@ FALLBACK_LIST_SIZE = {
     "super_engaged": 4447, "lapsed_60d": 4000, "lapsed_90d": 5000,
     "lapsed_180d": 8000, "inner_circle": 800, "all_customers": 20000,
 }
+
+
+def _perf_rpr_by_audience() -> dict[str, float]:
+    """Compute avg RPR per audience from Klaviyo performance table (fallback when backfill pending)."""
+    try:
+        with get_conn() as conn:
+            rows = conn.execute(
+                """WITH cd AS (
+                     SELECT dimensions->>'entity_id' as eid,
+                            MAX(CASE WHEN metric_name='conversion_value' THEN metric_value END) as rev,
+                            MAX(CASE WHEN metric_name='recipients' THEN metric_value END) as rcpt
+                     FROM performance
+                     WHERE source='klaviyo' AND metric_name IN ('conversion_value','recipients')
+                       AND dimensions->>'kind'='campaign' AND dimensions->>'send_channel'='email'
+                     GROUP BY dimensions->>'entity_id'
+                   ),
+                   segs AS (
+                     SELECT cd.eid, cd.rev, cd.rcpt,
+                            jsonb_array_elements_text(p.dimensions->'segment_ids') as sid
+                     FROM cd
+                     JOIN performance p ON p.source='klaviyo' AND p.metric_name='conversion_value'
+                       AND p.dimensions->>'entity_id'=cd.eid AND p.dimensions->>'kind'='campaign'
+                     WHERE cd.rcpt > 0 AND cd.rev > 0
+                   )
+                   SELECT sid, AVG(rev / rcpt) as avg_rpr
+                   FROM segs GROUP BY sid"""
+            ).fetchall()
+        result = {}
+        for r in rows:
+            aud = _REVERSE_SEG.get(r[0])
+            if aud and r[1]:
+                result[aud] = float(r[1])
+        return result
+    except Exception:
+        return {}
 
 
 def run_audience_health() -> list[dict]:
@@ -54,9 +98,11 @@ def run_audience_health() -> list[dict]:
             (ninety_ago, thirty_ago, ninety_ago)
         ).fetchall()
 
+    perf_rpr = _perf_rpr_by_audience()
+
     db_map = {r[0]: {
         "last_send": r[1],
-        "rpr_90d": float(r[2] or 0),
+        "rpr_90d": float(r[2] or 0) or perf_rpr.get(r[0], 0),
         "rpr_30d": float(r[3] or 0),
         "sends_90d": int(r[4] or 0),
     } for r in rows}

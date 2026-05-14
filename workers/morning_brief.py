@@ -17,14 +17,68 @@ from datetime import date, timedelta
 MONTHLY_GOAL = 150_000
 REPLIT_DOMAIN = os.environ.get("REPLIT_DOMAIN", "beezy-agents-ingestion.replit.app")
 
+_CONTENT_LABEL = {
+    "klaviyo_campaign": "Email",
+    "sniper_followup":  "Follow-up email",
+    "hive_mind":        "Hive Mind newsletter",
+    "seo_blog":         "SEO blog post",
+    "sleep_audio":      "Sleep audio episode",
+    "sms_campaign":     "SMS",
+    "flow_experiment":  "Flow experiment",
+}
+_AUDIENCE_LABEL = {
+    "lapsed_30d": "Lapsed 30d customers", "lapsed_60d": "Lapsed 60d customers",
+    "lapsed_90d": "Lapsed 90d customers", "lapsed_180d": "Lapsed 180d customers",
+    "vip": "VIP customers", "inner_circle": "Inner Circle", "whales": "Whales",
+    "high_aov": "High-AOV customers", "engaged_customers": "Engaged customers",
+    "all_customers": "All customers", "active_seal": "Active Seal members",
+    "active_subscribers": "Active subscribers", "one_time_buyers": "One-time buyers",
+    "otb": "One-time buyers", "cart_abandoners": "Cart abandoners",
+    "engaged_prospects": "Engaged prospects", "super_engaged": "Super engaged prospects",
+    "hive_mind_prospects": "Hive Mind prospects",
+}
+_CONTENT_EMOJI = {
+    "hive_mind": "🌙", "klaviyo_campaign": "📧", "sniper_followup": "⚡",
+    "seo_blog": "📝", "sleep_audio": "🎙", "sms_campaign": "📱", "flow_experiment": "🔬",
+}
+
+
+def _fmt_time(t: str) -> str:
+    try:
+        h, m = int(t[:2]), int(t[3:5])
+        suffix = "am" if h < 12 else "pm"
+        h12 = h % 12 or 12
+        return (str(h12) + f":{m:02d}" + suffix) if m else (str(h12) + suffix)
+    except Exception:
+        return t
+
 
 def _pacing_data() -> dict:
+    """Read pacing cache; fall back to performance table for zero values."""
     try:
         from db.connection import get_conn
         with get_conn() as conn:
             row = conn.execute("SELECT value FROM agent_state WHERE key='pacing_cache'").fetchone()
-            if row:
-                return json.loads(row[0])
+            cache = json.loads(row[0]) if row else {}
+            cr = float(cache.get("campaign_rev", 0))
+            fr = float(cache.get("flow_rev", 0))
+            if cr == 0:
+                r = conn.execute(
+                    "SELECT COALESCE(SUM(metric_value),0) FROM performance "
+                    "WHERE source='klaviyo' AND metric_name='conversion_value' "
+                    "AND dimensions->>'kind'='campaign' AND measured_at >= date_trunc('month',NOW())"
+                ).fetchone()
+                cr = float(r[0] or 0) if r else 0
+            if fr == 0:
+                r = conn.execute(
+                    "SELECT COALESCE(SUM(metric_value),0) FROM performance "
+                    "WHERE source='klaviyo' AND metric_name='conversion_value' "
+                    "AND dimensions->>'kind'='flow' AND measured_at >= date_trunc('month',NOW())"
+                ).fetchone()
+                fr = float(r[0] or 0) if r else 0
+            cache["campaign_rev"] = cr
+            cache["flow_rev"] = fr
+            return cache
     except Exception:
         pass
     return {}
@@ -140,19 +194,24 @@ def run_morning_brief() -> None:
 
     send_lines = []
     for s in planned:
-        ct = s.get("content_type", "?")
+        ct  = s.get("content_type", "?")
         aud = s.get("audience", "?")
-        tm = s.get("send_time_est", "?")
-        rv = float(s.get("revenue_estimate", 0) or 0)
-        ex = exec_map.get((ct, aud))
-        status_str = f" ✅" if ex and ex["s"] in ("dispatched", "completed") else ""
-        rv_str = f" — est. ${rv:,.0f}" if rv else ""
-        send_lines.append(f"  • {ct} → {aud} at {tm} ET{rv_str}{status_str}")
+        tm  = _fmt_time(s.get("send_time_est", "?"))
+        rv  = float(s.get("revenue_estimate", 0) or 0)
+        ex  = exec_map.get((ct, aud))
+        emoji    = _CONTENT_EMOJI.get(ct, "•")
+        label    = _CONTENT_LABEL.get(ct, ct)
+        aud_nice = _AUDIENCE_LABEL.get(aud, aud.replace("_", " ").title())
+        done_str = " ✅" if ex and ex["s"] in ("dispatched", "completed") else ""
+        rv_str   = f" — est. ${rv:,.0f}" if rv else ""
+        send_lines.append(f"  {emoji} {label} → {aud_nice} at {tm}{rv_str}{done_str}")
 
     if not send_lines:
         # Check executions in case orchestrator already ran
         for e in executed:
-            send_lines.append(f"  • {e['t']} → {e['a']} — {e['s']}")
+            label    = _CONTENT_LABEL.get(e["t"], e["t"])
+            aud_nice = _AUDIENCE_LABEL.get(e["a"], e["a"].replace("_", " ").title())
+            send_lines.append(f"  • {label} → {aud_nice} — {e['s']}")
 
     # Action items
     action_lines = []
@@ -163,7 +222,9 @@ def run_morning_brief() -> None:
 
     failed = _failed_slots()
     for f in failed:
-        action_lines.append(f"  • ❌ {f['t']} / {f['a']} failed — {f['reason']}")
+        label    = _CONTENT_LABEL.get(f["t"], f["t"])
+        aud_nice = _AUDIENCE_LABEL.get(f["a"], f["a"].replace("_", " ").title()) if f["a"] else ""
+        action_lines.append(f"  • ❌ {label}{' / ' + aud_nice if aud_nice else ''} failed — {f['reason']}")
 
     priority_mode = _daily_priority_mode()
     if priority_mode and priority_mode != "maintain":

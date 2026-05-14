@@ -7,7 +7,7 @@ Single deployment handles everything.
 import sys
 import os
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -253,6 +253,38 @@ async def approve_week():
                 "ON CONFLICT (week_start) DO UPDATE SET approved_at=NOW(), approved_by='dashboard'",
                 (today, token)
             )
+            conn.commit()
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/dashboard", status_code=303)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/approve-month")
+async def approve_month():
+    """Mark this month's calendar as approved — same as typing 'approved' in Slack."""
+    from datetime import date
+    today = date.today()
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            # Write approvals for all weeks in the month
+            month_start = today.replace(day=1)
+            import calendar as _cal
+            last_day = _cal.monthrange(today.year, today.month)[1]
+            month_end = today.replace(day=last_day)
+            import hashlib, os
+            secret = os.environ.get("BEEZY_ANTHROPIC_API_KEY", "secret")
+            current = month_start - timedelta(days=month_start.weekday())  # Monday on or before month start
+            while current <= month_end:
+                token = hashlib.sha256((str(current) + secret).encode()).hexdigest()[:16]
+                conn.execute(
+                    "INSERT INTO calendar_approvals (week_start, token, approved_at, approved_by) "
+                    "VALUES (%s, %s, NOW(), 'dashboard') "
+                    "ON CONFLICT (week_start) DO UPDATE SET approved_at=NOW(), approved_by='dashboard'",
+                    (current, token)
+                )
+                current += timedelta(days=7)
             conn.commit()
         from fastapi.responses import RedirectResponse
         return RedirectResponse(url="/dashboard", status_code=303)

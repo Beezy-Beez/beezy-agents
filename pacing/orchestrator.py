@@ -58,11 +58,15 @@ def _already_ran(conn, decision_id, slot):
         return cur.fetchone() is not None
 
 
-def _mark(conn, decision_id, slot, status, notes=""):
+def _mark(conn, decision_id, slot, status, notes="", klaviyo_campaign_id=None):
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO calendar_executions (decision_id, slot_date, content_type, audience, topic_angle, status, notes) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-            (decision_id, slot["date"], slot.get("content_type"), slot.get("audience",""), slot.get("topic_angle",""), status, notes)
+            "INSERT INTO calendar_executions "
+            "(decision_id, slot_date, content_type, audience, topic_angle, status, notes, klaviyo_campaign_id, is_preliminary) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (decision_id, slot["date"], slot.get("content_type"), slot.get("audience",""),
+             slot.get("topic_angle",""), status, notes, klaviyo_campaign_id,
+             True if klaviyo_campaign_id else None)
         )
     conn.commit()
 
@@ -174,8 +178,16 @@ def run_daily():
             try:
                 print("[orchestrator]   -> " + label)
                 notes = handler(slot)
-                _mark(conn, decision_id, slot, "dispatched", notes)
-                dispatched.append(label + ":" + notes)
+                # Extract Klaviyo campaign_id from handler return value
+                klaviyo_id = None
+                if isinstance(notes, str) and notes.startswith("klaviyo_draft:"):
+                    klaviyo_id = notes[len("klaviyo_draft:"):]
+                elif isinstance(notes, dict) and notes.get("campaign_id"):
+                    klaviyo_id = notes["campaign_id"]
+                if isinstance(notes, dict):
+                    notes = "klaviyo_draft:" + notes.get("campaign_id", "?")
+                _mark(conn, decision_id, slot, "dispatched", notes, klaviyo_campaign_id=klaviyo_id)
+                dispatched.append(label + ":" + (notes or ""))
             except Exception as e:
                 err = str(e)
                 print("[orchestrator]   FAIL " + label + ": " + err)
