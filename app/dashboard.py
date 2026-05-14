@@ -61,6 +61,13 @@ def _pacing_data() -> dict:
     pct = revenue / MONTHLY_GOAL * 100
     daily_needed = (MONTHLY_GOAL - revenue) / days_left
 
+    return {
+        "revenue": revenue, "goal": MONTHLY_GOAL, "pct": pct,
+        "campaigns": campaign_count, "days_elapsed": days_elapsed,
+        "days_left": days_left, "daily_needed": daily_needed,
+        "campaign_rev": campaign_rev, "flow_rev": flow_rev,
+    }
+
 def _pacing_data_DISABLED() -> dict:
     """Pull LIVE revenue from Klaviyo campaign + flow reports for the current month."""
     today = date.today()
