@@ -319,6 +319,30 @@ async def refresh_pacing():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.post("/api/refresh-audience-health")
+async def refresh_audience_health():
+    """Pull Klaviyo campaign history → compute RPR per audience → cache in agent_state."""
+    try:
+        loop = asyncio.get_event_loop()
+        from app.dashboard import pull_klaviyo_audience_health
+        result = await loop.run_in_executor(None, pull_klaviyo_audience_health)
+        return JSONResponse({"status": "ok", "audiences": len(result), "data": result})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/run-flow-check")
+async def run_flow_check():
+    """Run the weekly flow health check now — pulls 30-day Klaviyo flow metrics."""
+    try:
+        loop = asyncio.get_event_loop()
+        from workers.flow_monitor import run_flow_check as _flow_check
+        result = await loop.run_in_executor(None, _flow_check)
+        return JSONResponse({"status": "ok", "result": str(result)[:500]})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.post("/api/retry-slot")
 async def retry_slot(id: str):
     """Re-queue a failed calendar_executions row by setting status='pending'."""

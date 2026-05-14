@@ -112,6 +112,27 @@ def _pacing() -> dict:
 
 def _today_slots() -> list:
     today = date.today()
+    today_iso = today.isoformat()
+    month = today.strftime("%Y-%m")
+
+    # Load today's plan slots
+    plan_slots: dict[tuple, dict] = {}
+    drow = _q1(
+        "SELECT output FROM decisions WHERE decision_type='calendar_plan' AND output->>'month'=%s "
+        "ORDER BY created_at DESC LIMIT 1",
+        (month,)
+    )
+    if drow:
+        try:
+            payload = drow[0] if isinstance(drow[0], dict) else json.loads(drow[0])
+            for s in payload.get("slots", []):
+                if s.get("date") == today_iso:
+                    k = (s.get("content_type", ""), s.get("audience", ""))
+                    plan_slots[k] = s
+        except Exception:
+            pass
+
+    # Load execution rows for today (deduped)
     rows = _q(
         """SELECT DISTINCT ON (content_type, audience)
                id, content_type, audience, topic_angle, status, notes, actual_revenue, klaviyo_campaign_id
@@ -120,9 +141,37 @@ def _today_slots() -> list:
            ORDER BY content_type, audience, id ASC""",
         (today,)
     )
-    return [{"id": str(r[0]), "t": r[1], "a": r[2], "tp": r[3] or "",
-             "s": r[4], "n": (r[5] or "")[:100], "rv": float(r[6] or 0),
-             "kid": r[7] or ""} for r in rows]
+    exec_by_key: dict[tuple, dict] = {}
+    for r in rows:
+        k = (r[1], r[2])
+        exec_by_key[k] = {
+            "id": str(r[0]), "t": r[1], "a": r[2],
+            "tp": r[3] or "", "s": r[4],
+            "n": (r[5] or "")[:100], "rv": float(r[6] or 0), "kid": r[7] or ""
+        }
+
+    result = []
+    seen: set = set()
+
+    # Plan slots first — overlay with exec data where available
+    for k, s in plan_slots.items():
+        seen.add(k)
+        ex = exec_by_key.get(k)
+        if ex:
+            result.append(ex)
+        else:
+            result.append({
+                "id": "", "t": s.get("content_type", ""), "a": s.get("audience", ""),
+                "tp": s.get("topic_angle", "")[:100], "s": "planned",
+                "n": "", "rv": float(s.get("revenue_estimate", 0) or 0), "kid": ""
+            })
+
+    # Any exec slots dispatched outside the plan (extra campaigns run ad-hoc)
+    for k, ex in exec_by_key.items():
+        if k not in seen:
+            result.append(ex)
+
+    return result
 
 
 def _next_send_date() -> str:
@@ -306,7 +355,8 @@ def _upcoming_slots() -> list:
     return result
 
 
-_REVERSE_SEG = {
+# Confirmed May 2026 segment IDs from CLAUDE.md
+_SEG_TO_AUDIENCE = {
     "UEQD6k": "lapsed_30d", "UfARWm": "lapsed_60d", "XuS7rY": "lapsed_90d",
     "W98qh3": "lapsed_180d", "RArtzN": "vip", "RvtHdn": "engaged_customers",
     "UBFUcH": "active_seal", "VAUD58": "whales", "Xrp3ha": "engaged_prospects",
@@ -315,47 +365,159 @@ _REVERSE_SEG = {
 }
 
 
-def _perf_rpr_by_audience() -> dict[str, float]:
-    """Compute avg RPR per audience from Klaviyo performance table via segment_ids."""
-    rows = _q(
-        """WITH cd AS (
-             SELECT dimensions->>'entity_id' as eid,
-                    MAX(CASE WHEN metric_name='conversion_value' THEN metric_value END) as rev,
-                    MAX(CASE WHEN metric_name='recipients' THEN metric_value END) as rcpt
-             FROM performance
-             WHERE source='klaviyo' AND metric_name IN ('conversion_value','recipients')
-               AND dimensions->>'kind'='campaign' AND dimensions->>'send_channel'='email'
-             GROUP BY dimensions->>'entity_id'
-           ),
-           segs AS (
-             SELECT cd.eid, cd.rev, cd.rcpt,
-                    jsonb_array_elements_text(p.dimensions->'segment_ids') as sid
-             FROM cd
-             JOIN performance p ON p.source='klaviyo' AND p.metric_name='conversion_value'
-               AND p.dimensions->>'entity_id'=cd.eid AND p.dimensions->>'kind'='campaign'
-             WHERE cd.rcpt > 0 AND cd.rev > 0
-           )
-           SELECT sid, AVG(rev / rcpt) as avg_rpr
-           FROM segs
-           GROUP BY sid"""
-    )
-    result = {}
-    for r in rows:
-        aud = _REVERSE_SEG.get(r[0])
-        if aud and r[1]:
-            result[aud] = float(r[1])
+def pull_klaviyo_audience_health() -> list:
+    """
+    Pull sent campaigns from Klaviyo (last 365 days), map segment_ids → audience,
+    fetch revenue/RPR from the reporting API, aggregate by audience.
+    Stores result in agent_state['audience_health'] and returns the list.
+    """
+    import os, time as _t
+    import httpx as _httpx
+
+    api_key = os.environ.get("KLAVIYO_API_KEY", "")
+    if not api_key:
+        return []
+
+    headers = {
+        "Authorization": f"Klaviyo-API-Key {api_key}",
+        "revision": "2025-10-15",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    today = date.today()
+    cutoff = date(today.year - 1, today.month, today.day)
+
+    # Step 1: List sent campaigns (newest first, stop at 1 year back)
+    campaigns_info: dict[str, dict] = {}
+    url: str | None = "https://a.klaviyo.com/api/campaigns/"
+    params: dict = {
+        "filter": "equals(messages.channel,'email'),equals(status,'sent')",
+        "fields[campaign]": "name,send_time,audiences",
+        "sort": "-send_time",
+        "page[size]": "50",
+    }
+    page = 0
+    while url and page < 10:
+        try:
+            resp = _httpx.get(url, headers=headers, params=params, timeout=20)
+            if not resp.is_success:
+                break
+            body = resp.json()
+            stop = False
+            for item in body.get("data", []):
+                attrs = item.get("attributes", {})
+                st = attrs.get("send_time") or ""
+                try:
+                    from datetime import datetime as _dt, timezone as _tz
+                    send_date = _dt.fromisoformat(st.replace("Z", "+00:00")).date()
+                except Exception:
+                    continue
+                if send_date < cutoff:
+                    stop = True
+                    break
+                seg_ids = list((attrs.get("audiences") or {}).get("included") or [])
+                audience = next((v for k, v in _SEG_TO_AUDIENCE.items() if k in seg_ids), None)
+                if audience:
+                    campaigns_info[item["id"]] = {"audience": audience, "send_date": send_date}
+            url = body.get("links", {}).get("next") if not stop else None
+            params = {}
+            page += 1
+            _t.sleep(0.25)
+        except Exception:
+            break
+
+    if not campaigns_info:
+        return []
+
+    # Step 2: Fetch metrics for all campaigns in one report
+    metrics_by_campaign: dict[str, dict] = {}
+    try:
+        resp = _httpx.post(
+            "https://a.klaviyo.com/api/campaign-values-reports/",
+            headers=headers,
+            json={"data": {"type": "campaign-values-report", "attributes": {
+                "statistics": ["recipients", "conversion_value", "revenue_per_recipient"],
+                "timeframe": {"key": "last_365_days"},
+                "conversion_metric_id": "X93gjq",
+                "group_by": ["campaign_id"],
+            }}},
+            timeout=45,
+        )
+        if resp.is_success:
+            for r in resp.json().get("data", {}).get("attributes", {}).get("results", []):
+                cid = r.get("groupings", {}).get("campaign_id", "")
+                if cid and cid in campaigns_info:
+                    s = r.get("statistics", {})
+                    metrics_by_campaign[cid] = {
+                        "recipients": int(float(s.get("recipients", 0) or 0)),
+                        "revenue": float(s.get("conversion_value", 0) or 0),
+                        "rpr": float(s.get("revenue_per_recipient", 0) or 0),
+                    }
+    except Exception:
+        pass
+
+    # Step 3: Aggregate by audience
+    by_aud: dict[str, dict] = {}
+    for cid, info in campaigns_info.items():
+        aud = info["audience"]
+        sd = info["send_date"]
+        rpr = metrics_by_campaign.get(cid, {}).get("rpr", 0)
+        if aud not in by_aud:
+            by_aud[aud] = {"last_send": sd, "sends_90d": 0, "rprs_90d": []}
+        e = by_aud[aud]
+        if sd > e["last_send"]:
+            e["last_send"] = sd
+        if (today - sd).days <= 90:
+            e["sends_90d"] += 1
+            if rpr > 0:
+                e["rprs_90d"].append(rpr)
+
+    result = []
+    for aud, data in by_aud.items():
+        rprs = data["rprs_90d"]
+        rpr_90d = sum(rprs) / len(rprs) if rprs else 0
+        days_since = (today - data["last_send"]).days
+        health = "RECENT" if days_since < 7 else ("WARM" if days_since < 14 else "FRESH")
+        result.append({
+            "audience": aud,
+            "last_send": str(data["last_send"]),
+            "days_since": days_since,
+            "rpr_90d": round(rpr_90d, 4),
+            "rpr_30d": 0.0,
+            "sends_90d": data["sends_90d"],
+            "health": health,
+        })
+    result.sort(key=lambda x: -x["rpr_90d"])
+
+    # Cache in agent_state
+    try:
+        with _conn() as conn:
+            conn.execute(
+                "INSERT INTO agent_state (key, value, updated_at) VALUES ('audience_health', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                (json.dumps({"data": result, "as_of": today.isoformat()}),)
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"[dashboard] audience_health cache write failed: {e}")
+
     return result
 
 
 def _audience_health() -> list:
-    # Try agent_state first (written by workers/audience_health.py once built)
-    row = _q1("SELECT value FROM agent_state WHERE key='audience_health'")
+    # Check agent_state cache (written by pull_klaviyo_audience_health or audience_health worker)
+    row = _q1("SELECT value, updated_at FROM agent_state WHERE key='audience_health'")
     if row:
         try:
-            return json.loads(row[0])
+            d = json.loads(row[0])
+            if isinstance(d, list):
+                return d  # legacy format
+            if isinstance(d, dict) and "data" in d:
+                return d["data"]
         except Exception:
             pass
-    # Fallback: compute from calendar_executions + performance table for RPR
+
+    # Fallback: compute from calendar_executions (works once backfill has run)
     today = date.today()
     rows = _q(
         """SELECT audience,
@@ -365,33 +527,25 @@ def _audience_health() -> list:
                   COUNT(DISTINCT slot_date) FILTER (WHERE slot_date > CURRENT_DATE - 90 AND status IN ('dispatched','completed')) as sends_90d
            FROM calendar_executions
            WHERE status IN ('dispatched','completed') AND audience IS NOT NULL
-             AND audience NOT LIKE 'test_%%'
+             AND audience NOT LIKE 'test_%%' AND actual_rpr > 0
            GROUP BY audience
            ORDER BY MAX(slot_date) DESC"""
     )
-    # Fallback RPR from Klaviyo performance (when actual_rpr not backfilled yet)
-    perf_rpr = _perf_rpr_by_audience()
+    if not rows:
+        return []
+
     result = []
     for r in rows:
-        audience = r[0]
         last_send = r[1]
-        rpr_90d = float(r[2] or 0) or perf_rpr.get(audience, 0)
-        rpr_30d = float(r[3] or 0)
-        sends_90d = int(r[4] or 0)
         days_since = (today - last_send).days if last_send else 999
-        if days_since < 7:
-            health = "RECENT"
-        elif days_since < 14:
-            health = "WARM"
-        else:
-            health = "FRESH"
+        health = "RECENT" if days_since < 7 else ("WARM" if days_since < 14 else "FRESH")
         result.append({
-            "audience": audience,
+            "audience": r[0],
             "last_send": str(last_send) if last_send else "Never",
             "days_since": days_since,
-            "rpr_90d": rpr_90d,
-            "rpr_30d": rpr_30d,
-            "sends_90d": sends_90d,
+            "rpr_90d": float(r[2] or 0),
+            "rpr_30d": float(r[3] or 0),
+            "sends_90d": int(r[4] or 0),
             "health": health,
         })
     return sorted(result, key=lambda x: -x["rpr_90d"])
@@ -780,7 +934,14 @@ def _html_audience_health(data: list) -> str:
         return """
         <div class="card">
           <div class="card-title">Audience Health</div>
-          <div class="empty-state">No send history yet.</div>
+          <div class="empty-state" style="padding:20px 0">
+            No audience data cached yet.<br>
+            <small style="color:#bbb">Loads from Klaviyo history — 90-day RPR per audience.</small>
+          </div>
+          <button class="btn-approve" style="margin-top:12px"
+                  onclick="apiPost('/api/refresh-audience-health','Audience health loaded! Refreshing...')">
+            Load Audience History from Klaviyo
+          </button>
         </div>"""
 
     _HC = {"FRESH": ("#1e7e34", "FRESH"), "WARM": ("#e07b00", "WARM"), "RECENT": ("#c0392b", "COOLDOWN")}
@@ -820,7 +981,14 @@ def _html_flows(data: dict | None) -> str:
         return """
         <div class="card">
           <div class="card-title">Flow Health</div>
-          <div class="empty-state">No flow data. Type <code>flow check</code> in Slack.</div>
+          <div class="empty-state" style="padding:20px 0">
+            No flow data yet — runs weekly Sunday 9:15pm.<br>
+            <small style="color:#bbb">Or click below to run now (pulls 30-day Klaviyo flow metrics).</small>
+          </div>
+          <button class="btn-approve" style="margin-top:12px"
+                  onclick="apiPost('/api/run-flow-check','Flow check running! Takes ~30s. Refresh in a moment.')">
+            Run Flow Health Check Now
+          </button>
         </div>"""
 
     checked_at = data.get("_checked_at", "")
@@ -830,6 +998,10 @@ def _html_flows(data: dict | None) -> str:
         <div class="card">
           <div class="card-title">Flow Health <span class="card-title-meta">{checked_at}</span></div>
           <div class="empty-state">No flow analysis available.</div>
+          <button class="btn-approve" style="margin-top:12px;font-size:12px;padding:8px"
+                  onclick="apiPost('/api/run-flow-check','Flow check running! Refresh in a moment.')">
+            Re-run Flow Check
+          </button>
         </div>"""
 
     rows_html = ""

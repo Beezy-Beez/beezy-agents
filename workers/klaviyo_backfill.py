@@ -30,22 +30,22 @@ CONVERSION_METRIC_ID = "X93gjq"  # Placed Order
 # ── Klaviyo segment/list ID → internal audience name ──────────────────────────
 # Add new IDs here as you discover them from campaign audience data.
 SEGMENT_ID_TO_AUDIENCE: dict[str, str] = {
-    # Lists
+    # Confirmed May 2026 IDs (from CLAUDE.md)
+    "UEQD6k": "lapsed_30d",
+    "UfARWm": "lapsed_60d",
+    "XuS7rY": "lapsed_90d",
+    "W98qh3": "lapsed_180d",
+    "RArtzN": "vip",
+    "RvtHdn": "engaged_customers",
+    "UBFUcH": "active_seal",
+    "VAUD58": "whales",
+    "Xrp3ha": "engaged_prospects",
     "Sme9Nq": "super_engaged",
-    "Xrp3ha": "engaged_customers",
-    "Y6VSre": "hive_mind_list",
-    "XFSxZt": "all_customers",
-    # Segments (add as found in campaign reports)
-    "VJp3sS": "vip",
     "QHV2s5": "inner_circle",
-    "Ng4jLD": "lapsed_30d",
-    "RpYqJr": "lapsed_60d",
-    "WNmqaK": "lapsed_90d",
-    "SXmqrL": "winback_180d",
-    "UJqkrA": "engaged_prospects",
-    "TX6qpM": "active_seal",
-    "VG9nxK": "active_subscribers",
-    "YP3mzR": "one_time_buyers",
+    "Y6VSre": "hive_mind_prospects",
+    "XFSxZt": "all_customers",
+    # Lists (for campaign audience matching)
+    "Y6VSre": "hive_mind_prospects",
 }
 
 # Campaign name patterns → content_type (checked in order; first match wins)
