@@ -1,4 +1,17 @@
 """
+Move Slack agent from Scheduled Deployment into the FastAPI web server.
+Runs as a background loop every 30 seconds — more reliable than cron.
+"""
+import base64, os
+
+# Read current app/main.py
+main_path = "app/main.py"
+try:
+    existing = open(main_path).read()
+except FileNotFoundError:
+    existing = ""
+
+new_main = '''"""
 Beezy Agents — FastAPI web server with background Slack agent.
 The Slack agent runs every 30 seconds as a background task.
 """
@@ -36,3 +49,11 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok", "slack_agent": "running"}
+'''
+
+os.makedirs("app", exist_ok=True)
+open(main_path, "w").write(new_main)
+print("app/main.py updated — Slack agent now runs in web server background")
+print()
+print("Redeploy the WEB deployment (not scheduled) in Replit Deployments tab.")
+print("The Slack agent will run every 30 seconds as long as the web server is up.")
