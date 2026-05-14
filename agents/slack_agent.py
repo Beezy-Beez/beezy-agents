@@ -418,10 +418,33 @@ def _process_beezy_agents(conn) -> None:
         print(f"[slack_agent] Message from {user}: {text[:80]}")
 
         try:
-            # Immediately acknowledge so Boris knows message was received
-            _post_message(BEEZY_AGENTS_CHANNEL, "⏳ Got it — working on it...")
+            # Fast keyword matching — no API call needed for known commands
+            text_lower = text.strip().lower()
+            fast_match = {
+                "help": {"action": "help"},
+                "status": {"action": "status"},
+                "approved": {"action": "approve_calendar"},
+                "approved week": {"action": "approve_week"},
+                "deploy campaigns": {"action": "deploy_today"},
+                "generate calendar": {"action": "generate_calendar"},
+                "run weekly brief": {"action": "run_weekly_brief"},
+                "deploy latest episode": {"action": "deploy_episode"},
+                "restore calendar": {"action": "restore_calendar"},
+            }
 
-            result = _interpret_message(text)
+            result = fast_match.get(text_lower)
+            if result:
+                _post_message(BEEZY_AGENTS_CHANNEL, "⏳ On it...")
+            else:
+                _post_message(BEEZY_AGENTS_CHANNEL, "⏳ Got it — working on it...")
+                if "revenue" in text_lower or "money" in text_lower or "sales" in text_lower:
+                    result = {"action": "revenue_query"}
+                elif any(w in text_lower for w in ["add ", "remove ", "move ", "change ", "max ", "reduce "]):
+                    result = {"action": "modify_calendar", "params": {"request": text}}
+                elif "?" in text or any(w in text_lower for w in ["what", "how many", "show me", "planned"]):
+                    result = {"action": "query_calendar", "params": {"question": text}}
+                else:
+                    result = _interpret_message(text)
             action   = result.get("action", "none")
             response = result.get("response", "")
             params   = result.get("params", {})
