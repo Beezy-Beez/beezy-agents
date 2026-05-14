@@ -74,7 +74,7 @@ def _blocks():
         return []
 
 @router.get("/dashboard", response_class=HTMLResponse)
-async def dashboard():
+def dashboard():
     from datetime import datetime
     now = datetime.now(NY)
     p = _pacing()
