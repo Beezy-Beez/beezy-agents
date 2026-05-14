@@ -60,6 +60,15 @@ def _run_cron_jobs(now: datetime) -> None:
         except Exception as e:
             print(f"[cron] orchestrator error: {e}")
 
+    # Pacing cache refresh — daily at 7:35am (after pacing brain)
+    if h == 7 and m == 35:
+        try:
+            from workers.pacing_cache import refresh_pacing_cache
+            print('[cron] pacing cache refresh')
+            refresh_pacing_cache()
+        except Exception as e:
+            print(f'[cron] pacing cache error: {e}')
+
     # Revenue backfill — daily at 9am, pulls 72h-old campaign performance
     if h == 9 and m == 0:
         try:

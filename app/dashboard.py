@@ -36,6 +36,32 @@ def _get_conn():
 
 
 def _pacing_data() -> dict:
+    """Read cached pacing data from agent_state (updated by cron, not live API calls)."""
+    today = date.today()
+    month_start = today.replace(day=1)
+    days_elapsed = (today - month_start).days + 1
+    days_left = max(30 - days_elapsed, 1)
+    
+    campaign_rev = 0.0
+    flow_rev = 0.0
+    campaign_count = 0
+    try:
+        with _get_conn() as conn:
+            row = conn.execute("SELECT value FROM agent_state WHERE key = 'pacing_cache'").fetchone()
+            if row:
+                import json as _json
+                cache = _json.loads(row[0])
+                campaign_rev = float(cache.get("campaign_rev", 0))
+                flow_rev = float(cache.get("flow_rev", 0))
+                campaign_count = int(cache.get("campaign_count", 0))
+    except Exception as e:
+        print(f"[dashboard] pacing cache read failed: {e}")
+    
+    revenue = campaign_rev + flow_rev
+    pct = revenue / MONTHLY_GOAL * 100
+    daily_needed = (MONTHLY_GOAL - revenue) / days_left
+
+def _pacing_data_DISABLED() -> dict:
     """Pull LIVE revenue from Klaviyo campaign + flow reports for the current month."""
     today = date.today()
     month_start = today.replace(day=1)
@@ -57,9 +83,8 @@ def _pacing_data() -> dict:
     try:
         resp = httpx.post("https://a.klaviyo.com/api/campaign-values-reports/", headers=headers, timeout=30, json={
             "data": {"type": "campaign-values-report", "attributes": {
-                "statistics": ["recipients"],
-                "value_statistics": ["conversion_value"],
-                "timeframe": {"start": start_iso + "Z", "end": end_iso + "Z"},
+                "statistics": ["recipients", "conversion_value", "revenue_per_recipient"],
+                "timeframe": {"key": "this_month"},
                 "conversion_metric_id": "X93gjq",
             }}
         })
@@ -75,9 +100,8 @@ def _pacing_data() -> dict:
     try:
         resp = httpx.post("https://a.klaviyo.com/api/flow-values-reports/", headers=headers, timeout=30, json={
             "data": {"type": "flow-values-report", "attributes": {
-                "statistics": ["recipients"],
-                "value_statistics": ["conversion_value"],
-                "timeframe": {"start": start_iso + "Z", "end": end_iso + "Z"},
+                "statistics": ["recipients", "conversion_value", "revenue_per_recipient"],
+                "timeframe": {"key": "this_month"},
                 "conversion_metric_id": "X93gjq",
             }}
         })
