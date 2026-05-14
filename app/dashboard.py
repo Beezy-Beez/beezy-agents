@@ -51,6 +51,7 @@ def _pacing() -> dict:
     cr = fr = 0.0
     cc = 0
     as_of = None
+    stale = False
     try:
         row = _q1("SELECT value FROM agent_state WHERE key='pacing_cache'")
         if row:
@@ -59,23 +60,15 @@ def _pacing() -> dict:
             fr = float(d.get("flow_rev", 0))
             cc = int(d.get("campaign_count", 0))
             as_of = d.get("as_of")
+            if as_of:
+                try:
+                    cache_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+                    if (datetime.now(NY) - cache_dt).total_seconds() > 8 * 3600:
+                        stale = True
+                except Exception:
+                    pass
     except Exception:
         pass
-    # Fallback: compute from performance table when pacing_cache is stale/zero
-    if cr == 0:
-        r = _q1("""SELECT COALESCE(SUM(metric_value),0) FROM performance
-                   WHERE source='klaviyo' AND metric_name='conversion_value'
-                   AND dimensions->>'kind'='campaign'
-                   AND measured_at >= date_trunc('month', NOW())""")
-        if r:
-            cr = float(r[0] or 0)
-    if fr == 0:
-        r = _q1("""SELECT COALESCE(SUM(metric_value),0) FROM performance
-                   WHERE source='klaviyo' AND metric_name='conversion_value'
-                   AND dimensions->>'kind'='flow'
-                   AND measured_at >= date_trunc('month', NOW())""")
-        if r:
-            fr = float(r[0] or 0)
     rev = cr + fr
     pct = rev / MONTHLY_GOAL * 100 if MONTHLY_GOAL else 0
     daily_rate_actual = rev / days_elapsed if days_elapsed else 0
@@ -98,15 +91,18 @@ def _pacing() -> dict:
         "days_elapsed": days_elapsed, "days_left": days_left,
         "daily_needed": daily_needed, "daily_actual": daily_rate_actual,
         "forecast": forecast, "cr": cr, "fr": fr, "as_of": as_of,
-        "status": status,
+        "status": status, "stale": stale,
     }
 
 
 def _today_slots() -> list:
     today = date.today()
     rows = _q(
-        "SELECT id, content_type, audience, topic_angle, status, notes, actual_revenue, klaviyo_campaign_id "
-        "FROM calendar_executions WHERE slot_date=%s ORDER BY executed_at",
+        """SELECT DISTINCT ON (content_type, audience)
+               id, content_type, audience, topic_angle, status, notes, actual_revenue, klaviyo_campaign_id
+           FROM calendar_executions
+           WHERE slot_date=%s
+           ORDER BY content_type, audience, id ASC""",
         (today,)
     )
     return [{"id": str(r[0]), "t": r[1], "a": r[2], "tp": r[3] or "",
@@ -187,39 +183,83 @@ def _approval_status() -> dict:
     }
 
 
-def _upcoming_slots(days=7) -> list:
+def _upcoming_slots() -> list:
     today = date.today()
-    end = today + timedelta(days=days)
+    today_iso = today.isoformat()
+    import calendar as _cal2
+    last_day = _cal2.monthrange(today.year, today.month)[1]
+    month_end = date(today.year, today.month, last_day)
     month = today.strftime("%Y-%m")
+
+    # Load the calendar plan — used for topic/time/estimate lookup and future slots
     drow = _q1(
         "SELECT output FROM decisions WHERE decision_type='calendar_plan' AND output->>'month'=%s "
         "ORDER BY created_at DESC LIMIT 1",
         (month,)
     )
-    if not drow:
-        return []
-    try:
-        payload = drow[0] if isinstance(drow[0], dict) else json.loads(drow[0])
-        slots = payload.get("slots", [])
-    except Exception:
-        return []
+    plan_slots: list = []
+    if drow:
+        try:
+            payload = drow[0] if isinstance(drow[0], dict) else json.loads(drow[0])
+            plan_slots = payload.get("slots", [])
+        except Exception:
+            pass
 
-    window = [s for s in slots if today.isoformat() <= s.get("date", "") <= end.isoformat()]
-    window.sort(key=lambda x: (x.get("date", ""), x.get("send_time_est", "")))
+    # Build plan lookup for topic/time/estimate cross-ref (keyed by content_type+audience)
+    plan_by_key: dict = {}
+    for s in plan_slots:
+        k = (s.get("content_type", ""), s.get("audience", ""))
+        if k not in plan_by_key:
+            plan_by_key[k] = {
+                "tp": s.get("topic_angle", "")[:60],
+                "tm": s.get("send_time_est", ""),
+                "rv": float(s.get("revenue_estimate", 0) or 0),
+            }
 
-    # Overlay execution status
-    exec_rows = _q(
-        "SELECT id, slot_date, content_type, audience, status, klaviyo_campaign_id "
-        "FROM calendar_executions WHERE slot_date BETWEEN %s AND %s",
-        (today, end)
+    result: list = []
+
+    # TODAY: truth is calendar_executions (what actually ran), deduped by content_type+audience
+    today_rows = _q(
+        """SELECT DISTINCT ON (content_type, audience)
+               id, content_type, audience, status, klaviyo_campaign_id, actual_revenue
+           FROM calendar_executions
+           WHERE slot_date = %s
+           ORDER BY content_type, audience, id ASC""",
+        (today,)
     )
-    exec_map = {}
+    for r in today_rows:
+        k = (r[1], r[2])
+        plan = plan_by_key.get(k, {})
+        result.append({
+            "date": today_iso,
+            "t": r[1],
+            "a": r[2],
+            "tp": plan.get("tp", ""),
+            "tm": plan.get("tm", ""),
+            "rv": plan.get("rv", 0),
+            "actual_rev": float(r[5] or 0),
+            "status": r[3],
+            "exec_id": str(r[0]),
+            "kid": r[4] or "",
+        })
+
+    # FUTURE: planned slots from decisions table, overlaid with any already-dispatched rows
+    future_slots = [s for s in plan_slots if today_iso < s.get("date", "") <= month_end.isoformat()]
+    future_slots.sort(key=lambda x: (x.get("date", ""), x.get("send_time_est", "")))
+
+    exec_rows = _q(
+        "SELECT DISTINCT ON (slot_date, content_type, audience) "
+        "id, slot_date, content_type, audience, status, klaviyo_campaign_id, actual_revenue "
+        "FROM calendar_executions WHERE slot_date > %s AND slot_date <= %s "
+        "ORDER BY slot_date, content_type, audience, id ASC",
+        (today, month_end)
+    )
+    exec_map: dict = {}
     for r in exec_rows:
         k = (str(r[1]), r[2], r[3])
-        exec_map[k] = {"id": str(r[0]), "status": r[4], "kid": r[5] or ""}
+        exec_map[k] = {"id": str(r[0]), "status": r[4], "kid": r[5] or "", "actual_rev": float(r[6] or 0)}
 
-    result = []
-    for s in window:
+    for s in future_slots:
         k = (s.get("date", ""), s.get("content_type", ""), s.get("audience", ""))
         ex = exec_map.get(k, {})
         result.append({
@@ -229,10 +269,12 @@ def _upcoming_slots(days=7) -> list:
             "tp": s.get("topic_angle", "")[:60],
             "tm": s.get("send_time_est", ""),
             "rv": float(s.get("revenue_estimate", 0) or 0),
+            "actual_rev": ex.get("actual_rev", 0),
             "status": ex.get("status", "planned"),
             "exec_id": ex.get("id", ""),
             "kid": ex.get("kid", ""),
         })
+
     return result
 
 
@@ -292,7 +334,7 @@ def _audience_health() -> list:
                   MAX(slot_date) as last_send,
                   COALESCE(AVG(actual_rpr) FILTER (WHERE actual_rpr > 0 AND slot_date > CURRENT_DATE - 90), 0) as rpr_90d,
                   COALESCE(AVG(actual_rpr) FILTER (WHERE actual_rpr > 0 AND slot_date > CURRENT_DATE - 30), 0) as rpr_30d,
-                  COUNT(*) FILTER (WHERE slot_date > CURRENT_DATE - 90 AND status IN ('dispatched','completed')) as sends_90d
+                  COUNT(DISTINCT slot_date) FILTER (WHERE slot_date > CURRENT_DATE - 90 AND status IN ('dispatched','completed')) as sends_90d
            FROM calendar_executions
            WHERE status IN ('dispatched','completed') AND audience IS NOT NULL
              AND audience NOT LIKE 'test_%%'
@@ -458,7 +500,12 @@ def _html_command_center(p: dict) -> str:
         gc = "#c0392b" if behind_pct > 10 else "#e07b00"
         status_color = "#c0392b" if behind_pct > 10 else "#e07b00"
 
-    as_of_str = f" · as of {p['as_of'][:16]}" if p.get("as_of") else ""
+    if p.get("as_of"):
+        as_of_str = f" · as of {p['as_of'][:16]}"
+        if p.get("stale"):
+            as_of_str += " ⚠ stale"
+    else:
+        as_of_str = " · cache not yet populated (refreshes 7:35am daily)"
     forecast_str = f"${p['forecast']:,.0f}"
     forecast_note = "projected month-end at current pace"
     if p["forecast"] >= MONTHLY_GOAL:
@@ -607,15 +654,18 @@ def _html_approval(apv: dict) -> str:
 
 
 def _html_calendar(slots: list) -> str:
+    today = date.today()
+    month_label = today.strftime("%B %Y")
     if not slots:
-        return """
+        return f"""
         <div class="card">
-          <div class="card-title">7-Day Calendar</div>
+          <div class="card-title">{month_label} Calendar</div>
           <div class="empty-state">No upcoming slots found. Generate a calendar first.</div>
         </div>"""
 
-    total_rev = sum(s["rv"] for s in slots if s["t"] not in ("seo_blog", "flow_experiment"))
-    today_iso = date.today().isoformat()
+    total_est = sum(s["rv"] for s in slots if s["t"] not in ("seo_blog", "flow_experiment"))
+    total_actual = sum(s.get("actual_rev", 0) for s in slots if s["t"] not in ("seo_blog", "flow_experiment"))
+    today_iso = today.isoformat()
     last_date = ""
     rows_html = ""
     for s in slots:
@@ -634,6 +684,17 @@ def _html_calendar(slots: list) -> str:
             eid = s["exec_id"]
             retry_btn = f'<button class="btn-retry-sm" onclick="apiPost(\'/api/retry-slot?id={eid}\',\'Queued.\')">↺</button>'
         ct_color = _CT_COLORS.get(s["t"], "#555")
+        est_str = f'${s["rv"]:,.0f}' if s["rv"] else "—"
+        actual_rev = s.get("actual_rev", 0)
+        if actual_rev > 0:
+            pct_diff = (actual_rev - s["rv"]) / s["rv"] * 100 if s["rv"] else 0
+            diff_color = "#1e7e34" if actual_rev >= s["rv"] else "#c0392b"
+            diff_str = f'<span style="color:{diff_color};font-size:11px">({pct_diff:+.0f}%)</span>'
+            actual_str = f'${actual_rev:,.0f} {diff_str}'
+        elif s["status"] in ("dispatched", "completed") and d <= today_iso:
+            actual_str = '<span style="color:#aaa;font-size:11px">pending</span>'
+        else:
+            actual_str = "—"
         rows_html += f"""
         <tr class="{row_class}" style="border-left:3px solid {ct_color}">
           <td class="cal-date"><strong>{d_label}</strong>{"<span class='today-tag'>TODAY</span>" if is_today else ""}</td>
@@ -641,18 +702,22 @@ def _html_calendar(slots: list) -> str:
           <td>{s["a"]}</td>
           <td class="cal-topic">{s["tp"]}</td>
           <td>{s["tm"]} ET</td>
-          <td>{"$" + f'{s["rv"]:,.0f}' if s["rv"] else "—"}</td>
+          <td>{est_str}</td>
+          <td>{actual_str}</td>
           <td>{_status_badge(s["status"])} {retry_btn}</td>
         </tr>"""
 
+    meta = f"Est: ${total_est:,.0f}"
+    if total_actual > 0:
+        meta += f" · Actual: ${total_actual:,.0f}"
     return f"""
     <div class="card">
-      <div class="card-title">7-Day Calendar
-        <span class="card-title-meta">Projected revenue (campaigns only): ${total_rev:,.0f}</span>
+      <div class="card-title">{month_label} Calendar
+        <span class="card-title-meta">{meta}</span>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Date</th><th>Type</th><th>Audience</th><th>Topic</th><th>Time</th><th>Est. Rev</th><th>Status</th></tr></thead>
+          <thead><tr><th>Date</th><th>Type</th><th>Audience</th><th>Topic</th><th>Time</th><th>Est. Rev</th><th>Actual</th><th>Status</th></tr></thead>
           <tbody>{rows_html}</tbody>
         </table>
       </div>
@@ -717,16 +782,19 @@ def _html_flows(data: dict | None) -> str:
         </div>"""
 
     rows_html = ""
+    _SEV_COLOR = {"ok": "#1e7e34", "warn": "#e07b00", "critical": "#c0392b"}
+    _SEV_LABEL = {"ok": "HEALTHY", "warn": "WARNING", "critical": "CRITICAL"}
     for a in analyses[:10]:
         sev = a.get("severity", "ok")
-        sev_color = {"ok": "#1e7e34", "underperforming": "#e07b00", "broken": "#c0392b"}.get(sev, "#888")
+        sev_color = _SEV_COLOR.get(sev, "#888")
+        sev_label = _SEV_LABEL.get(sev, sev.upper())
         fix_badge = '<span class="badge" style="background:#7b2d8b">Fix queued</span>' if a.get("fix_queued") else ""
         rows_html += f"""
         <tr>
           <td>{a.get("name","?")[:28]}</td>
           <td>${float(a.get("revenue",0)):,.0f}</td>
           <td>${float(a.get("rpr",0)):.2f}</td>
-          <td><span class="badge" style="background:{sev_color}">{sev.upper()}</span> {fix_badge}</td>
+          <td><span class="badge" style="background:{sev_color}">{sev_label}</span> {fix_badge}</td>
         </tr>"""
 
     return f"""
@@ -914,7 +982,7 @@ def dashboard():
     today_slots = _today_slots()
     next_send = _next_send_date() if not today_slots else ""
     apv = _approval_status()
-    upcoming = _upcoming_slots(7)
+    upcoming = _upcoming_slots()
     audience_health = _audience_health()
     flows = _flow_health()
     performers = _top_performers()

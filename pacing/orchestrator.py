@@ -52,8 +52,10 @@ def _today_priority_mode(conn) -> str:
 def _already_ran(conn, decision_id, slot):
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT 1 FROM calendar_executions WHERE decision_id = %s AND slot_date = %s AND content_type = %s AND audience = %s AND status != 'failed' LIMIT 1",
-            (decision_id, slot["date"], slot.get("content_type"), slot.get("audience", ""))
+            "SELECT 1 FROM calendar_executions "
+            "WHERE slot_date = %s AND content_type = %s AND audience = %s "
+            "AND status NOT IN ('failed', 'skipped') LIMIT 1",
+            (slot["date"], slot.get("content_type"), slot.get("audience", ""))
         )
         return cur.fetchone() is not None
 

@@ -689,10 +689,16 @@ def _process_new_episodes(conn) -> None:
         _save_last_read_ts(conn, "new_episodes", ts)
 
 
+_bot_id_cache: str = ""
+
 def _get_bot_id() -> str:
+    global _bot_id_cache
+    if _bot_id_cache:
+        return _bot_id_cache
     resp = httpx.get(SLACK_API + "/auth.test",
                      headers=_slack_headers(), timeout=10)
-    return resp.json().get("user_id", "")
+    _bot_id_cache = resp.json().get("user_id", "")
+    return _bot_id_cache
 
 
 # ── Main entry ────────────────────────────────────────────────────────────────
@@ -740,8 +746,6 @@ def run_once() -> None:
         raise  # let _slack_loop handle logging + backoff
     except Exception as e:
         print(f"[slack_agent] Error: {e}")
-        from lib.slack import notify_failure
-        notify_failure(source="slack_agent", error=str(e))
 
 
 if __name__ == "__main__":
