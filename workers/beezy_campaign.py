@@ -31,6 +31,14 @@ from workers.auto_schedule import schedule_campaign
 
 MODEL = "claude-sonnet-4-6"
 
+# A/B testing: segments with estimated list size > 3,000 get a second subject generated.
+LARGE_SEGMENTS = {
+    "lapsed_30d", "lapsed_60d", "lapsed_60_90d", "lapsed_90d", "lapsed_90_180d",
+    "lapsed_180d", "lapsed_180d_plus", "winback_180d",
+    "vip", "engaged_customers", "all_customers",
+    "one_time_buyers", "otb", "engaged_prospects", "super_engaged",
+}
+
 SEGMENT_IDS = {
     "lapsed_30d": "UEQD6k", "lapsed_60d": "UfARWm", "lapsed_60_90d": "UfARWm",
     "lapsed_90d": "XuS7rY", "lapsed_90_180d": "XuS7rY", "lapsed_180d": "W98qh3",
@@ -293,6 +301,14 @@ def _generate_copy(slot: dict, page_url: str = "", discount_code: str = "") -> d
     if slot.get("parent_send") and slot.get("content_type") == "sniper_followup":
         context += "\nNon-opener follow-up to: " + slot["parent_send"] + " — different subject required"
 
+    # Incorporate winning subject pattern if one has been learned for this audience
+    patterns = _load_subject_patterns()
+    winner = patterns.get(aud_key, {}).get("winning_type")
+    if winner == "benefit":
+        context += "\nSubject line guidance: previous sends show BENEFIT-FOCUSED subjects outperform curiosity for this audience. Lead with the outcome (e.g. 'Sleep through the night, {{ first_name }}')."
+    elif winner == "curiosity":
+        context += "\nSubject line guidance: previous sends show CURIOSITY subjects outperform benefit for this audience. Lead with a question or mystery."
+
     msg = client.messages.create(
         model=MODEL, max_tokens=1024, system=COPY_SYSTEM,
         messages=[{"role": "user", "content": context}],
@@ -300,6 +316,56 @@ def _generate_copy(slot: dict, page_url: str = "", discount_code: str = "") -> d
     raw = msg.content[0].text.strip()
     s, e = raw.find("{"), raw.rfind("}")
     return json.loads(raw[s:e+1] if s != -1 else raw)
+
+
+# ── A/B subject line helpers ──────────────────────────────────────────────────
+
+def _load_subject_patterns() -> dict:
+    """Read subject_patterns from agent_state to inform copy generation."""
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM agent_state WHERE key='subject_patterns'"
+            ).fetchone()
+        if row:
+            return json.loads(row[0])
+    except Exception:
+        pass
+    return {}
+
+
+def _generate_ab_subject(slot: dict, primary_subject: str) -> str:
+    """Generate a benefit-focused alternative to the curiosity-based primary subject.
+
+    Primary is typically curiosity-driven (why/what/how). Alt is direct-benefit:
+    'Sleep through the night — finally' vs 'Why are you waking at 3am, {{ first_name }}?'
+    """
+    key = os.environ.get("BEEZY_ANTHROPIC_API_KEY")
+    client = anthropic.Anthropic(api_key=key)
+    system = (
+        "You are a subject line writer for Beezy Beez Honey (trybeezybeez.com). "
+        "Write ONE alternative email subject line for women 50+.\n"
+        "Style: direct benefit — state the outcome they will get, not the question/mystery.\n"
+        "Rules: 6-9 words. Include {{ first_name }} once. No exclamation marks. No click-bait. "
+        "Output ONLY the subject line text, nothing else."
+    )
+    context = (
+        f"Audience: {slot.get('audience', '?')}\n"
+        f"Topic: {slot.get('topic_angle', '')}\n"
+        f"Primary subject (curiosity-style): {primary_subject}\n\n"
+        "Write the benefit-focused alternative now:"
+    )
+    try:
+        msg = client.messages.create(
+            model=MODEL, max_tokens=80, system=system,
+            messages=[{"role": "user", "content": context}],
+        )
+        alt = msg.content[0].text.strip().strip('"').strip("'")
+        return alt if len(alt) > 5 else primary_subject
+    except Exception as e:
+        print(f"[beezy_campaign] A/B subject generation failed: {e}")
+        return primary_subject
 
 
 # ── Step 4: Generate image ─────────────────────────────────────────────────────
@@ -548,7 +614,15 @@ def run(slot: dict) -> dict:
     # Copy
     print("[beezy_campaign] Generating copy...")
     copy = _generate_copy(slot, page_url, discount_code)
-    print("[beezy_campaign]   Subject: " + copy.get("subject",""))
+    print("[beezy_campaign]   Subject A (curiosity): " + copy.get("subject",""))
+
+    # A/B subject generation for large segments (>3,000 estimated recipients)
+    ab_subject = ""
+    audience_key_ab = audience.lower().replace(" ", "_")
+    if audience_key_ab in LARGE_SEGMENTS:
+        print("[beezy_campaign] Large segment — generating benefit-focused alt subject...")
+        ab_subject = _generate_ab_subject(slot, copy.get("subject", ""))
+        print("[beezy_campaign]   Subject B (benefit):  " + ab_subject)
 
     # ── VALIDATOR GATE ──────────────────────────────────────────────────
     from db.connection import get_conn as _get_validator_conn
@@ -604,15 +678,15 @@ def run(slot: dict) -> dict:
 
     # ── 60-minute preview window ──────────────────────────────────────────
     print("[beezy_campaign] Posting preview — 60-minute cancel window...")
-    _post_preview(slot, copy, campaign_id, cdn_url)
-    _store_pending_schedule(campaign_id, slot, copy, cdn_url, page_url)
+    _post_preview(slot, copy, campaign_id, cdn_url, ab_subject=ab_subject)
+    _store_pending_schedule(campaign_id, slot, copy, cdn_url, page_url, ab_subject=ab_subject)
 
     camp_url = "https://www.klaviyo.com/campaign/" + campaign_id + "/wizard"
     print("[beezy_campaign]   Preview posted. Auto-schedules in 60 min: " + camp_url)
     return {"campaign_url": camp_url, "page_url": page_url, "campaign_id": campaign_id}
 
 
-def _post_preview(slot: dict, copy: dict, campaign_id: str, image_url: str) -> None:
+def _post_preview(slot: dict, copy: dict, campaign_id: str, image_url: str, ab_subject: str = "") -> None:
     webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
     if not webhook:
         return
@@ -620,11 +694,14 @@ def _post_preview(slot: dict, copy: dict, campaign_id: str, image_url: str) -> N
     send_time = slot.get("send_time_est", "TBD")
     rev = int(slot.get("revenue_estimate", 0) or 0)
     body_preview = " ".join(copy.get("body_paragraphs", [""])[:1])[:140]
+    subject_text = f"📧 *Subject A (curiosity — auto-selected):* `{copy.get('subject', '')}`"
+    if ab_subject and ab_subject != copy.get("subject", ""):
+        subject_text += f"\n📧 *Subject B (benefit):* `{ab_subject}`\n_A/B tracked — winner informs future sends_"
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": "👁 Campaign Preview — ready to schedule"}},
         {"type": "image", "image_url": image_url, "alt_text": "Email hero"},
         {"type": "section", "text": {"type": "mrkdwn", "text": (
-            f"📧 *Subject:* `{copy.get('subject', '')}`\n"
+            f"{subject_text}\n"
             f"👥 *Audience:* {aud}\n"
             f"🕐 *Scheduled:* {send_time} ET\n"
             f"💰 *Est. revenue:* ${rev:,}\n\n"
@@ -637,7 +714,7 @@ def _post_preview(slot: dict, copy: dict, campaign_id: str, image_url: str) -> N
     httpx.post(webhook, json={"text": "Campaign preview", "blocks": blocks}, timeout=10)
 
 
-def _store_pending_schedule(campaign_id: str, slot: dict, copy: dict, image_url: str, page_url: str) -> None:
+def _store_pending_schedule(campaign_id: str, slot: dict, copy: dict, image_url: str, page_url: str, ab_subject: str = "") -> None:
     """Store campaign in agent_state as pending_schedule so the cron can auto-schedule it after 60 min."""
     try:
         from db.connection import get_conn
@@ -650,6 +727,8 @@ def _store_pending_schedule(campaign_id: str, slot: dict, copy: dict, image_url:
             "page_url": page_url,
             "queued_at": now_iso,
             "cancelled": False,
+            "subject_type": "curiosity",  # primary subject is always curiosity-first
+            "ab_subject": ab_subject,     # benefit-focused alt (empty if small segment)
         }
         with get_conn() as conn:
             row = conn.execute("SELECT value FROM agent_state WHERE key='pending_schedules'").fetchone()
@@ -691,10 +770,14 @@ def check_pending_schedules() -> None:
         # Time to schedule
         campaign_id = entry["campaign_id"]
         slot = entry.get("slot", {})
+        subject_type = entry.get("subject_type", "curiosity")
+        ab_subject = entry.get("ab_subject", "")
         print(f"[check_pending_schedules] scheduling {campaign_id} after {age_minutes:.0f}min")
         try:
             sched_result = schedule_campaign(campaign_id, slot)
-            note = "scheduled: " + sched_result.get("send_time", "?")
+            note = f"scheduled: {sched_result.get('send_time', '?')} | subject_type:{subject_type}"
+            if ab_subject:
+                note += f" | ab_subject:{ab_subject[:60]}"
         except Exception as se:
             note = "schedule_error: " + str(se)[:60]
             updated.append(entry)  # retry next pass
