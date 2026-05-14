@@ -534,7 +534,10 @@ def _process_beezy_agents(conn) -> None:
 
         # Skip bot's own messages and system messages
         if subtype or user == bot_id or not text:
+            _save_last_read_ts(conn, "beezy_agents", ts)
             continue
+        _save_last_read_ts(conn, "beezy_agents", ts)
+       
 
         print(f"[slack_agent] Message from {user}: {text[:80]}")
 
