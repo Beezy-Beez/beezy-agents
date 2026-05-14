@@ -736,9 +736,8 @@ def run_once() -> None:
         with get_conn() as conn:
             _process_beezy_agents(conn)
             _process_new_episodes(conn)
-    except httpx.NetworkError as e:
-        print(f"[slack_agent] Network error (backing off): {e}")
-        raise
+    except httpx.NetworkError:
+        raise  # let _slack_loop handle logging + backoff
     except Exception as e:
         print(f"[slack_agent] Error: {e}")
         from lib.slack import notify_failure

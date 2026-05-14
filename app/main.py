@@ -21,19 +21,30 @@ _last_cron_minute = -1
 
 
 async def _slack_loop():
-    """Polls Slack every 5 seconds; backs off to 30s on network errors."""
+    """Polls Slack every 5s; exponential backoff (30s→60s→…→300s) on network errors."""
+    import httpx as _httpx
     loop = asyncio.get_event_loop()
+    _net_backoff = 0   # consecutive network-error count
+    _net_logged  = False
     while True:
-        sleep_secs = 5
         try:
             from agents.slack_agent import run_once
             await loop.run_in_executor(None, run_once)
+            if _net_backoff:
+                print("[slack_loop] Slack connection restored.")
+            _net_backoff = 0
+            _net_logged  = False
+            await asyncio.sleep(5)
+        except _httpx.NetworkError as e:
+            _net_backoff += 1
+            sleep_secs = min(30 * _net_backoff, 300)   # 30→60→90→…→300s cap
+            if not _net_logged:
+                print(f"[slack_loop] Network unreachable ({e}). Backing off — will retry silently.")
+                _net_logged = True
+            await asyncio.sleep(sleep_secs)
         except Exception as e:
-            import httpx as _httpx
-            if isinstance(e, _httpx.NetworkError):
-                sleep_secs = 30
             print(f"[slack_loop] {e}")
-        await asyncio.sleep(sleep_secs)
+            await asyncio.sleep(30)
 
 
 def _run_cron_jobs(now: datetime) -> None:
