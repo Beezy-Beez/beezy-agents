@@ -74,27 +74,13 @@ def _get_messages_since(channel: str, oldest_ts: str) -> list[dict]:
     return data.get("messages", [])
 
 
-def _get_last_read_ts(conn, channel: str) -> str:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT value FROM agent_state WHERE key = %s",
-            ("slack_last_read_" + channel,)
-        )
-        row = cur.fetchone()
-    if row:
-        return row[0]
-    return str(time.time() - 300)  # default: last 5 min
+_LAST_READ: dict[str, str] = {}
 
+def _get_last_read_ts(conn, channel: str) -> str:
+    return _LAST_READ.get(channel, str(time.time() - 300))
 
 def _save_last_read_ts(conn, channel: str, ts: str) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO agent_state (key, value) VALUES (%s, %s) "
-            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-            ("slack_last_read_" + channel, ts)
-        )
-    conn.commit()
-
+    _LAST_READ[channel] = ts
 
 # ── Command interpreter ───────────────────────────────────────────────────────
 
