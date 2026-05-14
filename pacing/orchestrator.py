@@ -97,12 +97,9 @@ def _handle_sleep_audio(slot):
 
 
 def _handle_sms(slot):
-    post_draft(
-        title="SMS Brief -- " + slot["date"],
-        summary_lines=["Audience: " + slot.get("audience","?"), "Rev. Est.: $" + str(int(slot.get("revenue_estimate",0)))],
-        body="*Angle:* " + slot.get("topic_angle","") + "\n\n*Rationale:* " + slot.get("rationale","") + "\n\n_Build and deploy via Klaviyo SMS. Max 2x/month._",
-    )
-    return "slack_draft"
+    """Full autonomous SMS pipeline."""
+    from workers.sms_campaign import run_sms_campaign
+    return run_sms_campaign(slot)
 
 
 HANDLERS = {

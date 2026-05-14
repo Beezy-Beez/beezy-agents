@@ -11,6 +11,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from app.dashboard import router as dashboard_router
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -58,6 +59,51 @@ def _run_cron_jobs(now: datetime) -> None:
             run_daily()
         except Exception as e:
             print(f"[cron] orchestrator error: {e}")
+
+    # Revenue backfill — daily at 9am, pulls 72h-old campaign performance
+    if h == 9 and m == 0:
+        try:
+            from workers.revenue_backfill import run_backfill
+            print("[cron] revenue backfill")
+            run_backfill()
+        except Exception as e:
+            print(f"[cron] backfill error: {e}")
+
+    # Weekly learning review — Sunday at 9pm ET
+    if now.weekday() == 6 and h == 21 and m == 0:
+        try:
+            from workers.learning_loop import run_weekly
+            print("[cron] weekly learning review")
+            run_weekly()
+        except Exception as e:
+            print(f"[cron] weekly review error: {e}")
+
+    # Weekly flow health check — Sunday at 9:15pm ET (after campaign review)
+    if now.weekday() == 6 and h == 21 and m == 15:
+        try:
+            from workers.flow_monitor import run_flow_check
+            print("[cron] flow health check")
+            run_flow_check()
+        except Exception as e:
+            print(f"[cron] flow monitor error: {e}")
+
+    # Bi-weekly pacing check — 15th of month at 9am
+    if now.day == 15 and h == 9 and m == 30:
+        try:
+            from workers.learning_loop import run_biweekly
+            print("[cron] bi-weekly pacing check")
+            run_biweekly()
+        except Exception as e:
+            print(f"[cron] biweekly error: {e}")
+
+    # Monthly retrospective — 1st of month at 9am
+    if now.day == 1 and h == 9 and m == 30:
+        try:
+            from workers.learning_loop import run_monthly
+            print("[cron] monthly retrospective")
+            run_monthly()
+        except Exception as e:
+            print(f"[cron] monthly retro error: {e}")
 
     if h == 10 and m == 0:
         try:
@@ -117,5 +163,11 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/healthz")
+async def _setup_routes():
+    pass
+
+app.include_router(dashboard_router)
+
+
 async def healthz():
     return {"status": "ok", "agents": "running"}

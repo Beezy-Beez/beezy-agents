@@ -26,6 +26,8 @@ from datetime import datetime, timedelta, timezone
 
 import anthropic
 import httpx
+from workers.validator import validate_campaign
+from workers.auto_schedule import schedule_campaign
 
 MODEL = "claude-sonnet-4-6"
 
@@ -40,6 +42,18 @@ SEGMENT_IDS = {
     "whales": "VAUD58", "high_aov": "Res3GH",
     "one_time_buyers": "UfARWm", "otb": "UfARWm", "cart_abandoners": "RvtHdn",
 }
+
+# Segments that are CUSTOMERS — never send to landing pages, never need education
+CUSTOMER_SEGMENTS = {
+    "lapsed_30d", "lapsed_60d", "lapsed_60_90d", "lapsed_90d", "lapsed_90_180d",
+    "lapsed_180d", "lapsed_180d_plus", "winback_180d",
+    "vip", "inner_circle", "engaged_customers", "all_customers",
+    "active_seal", "active_subscribers", "whales", "high_aov",
+    "one_time_buyers", "otb", "cart_abandoners",
+}
+
+# Segments that should NEVER get flat discounts or BOGO — they buy without them
+HIGH_VALUE_SEGMENTS = {"vip", "inner_circle", "whales", "high_aov", "active_seal", "active_subscribers"}
 
 TRACKING_PARAMS = [
     {"type": "static",  "value": "Klaviyo",       "name": "utm_source"},
@@ -212,16 +226,41 @@ COPY_SYSTEM = """You are the creative director for Beezy Beez Honey (trybeezybee
 DTC botanical extract honey. Target: women 50+. AOV ~$54.95.
 
 Write at top-1% Health & Wellness DTC benchmarks:
-- Subject: 6-9 words, curiosity-driven, personal. No clickbait.
-- Preview: under 90 chars, extends the subject naturally.
-- Body: 3 short paragraphs. Opens with a specific person or moment.
-  Personalization: {{ person.first_name|default:'there' }}
-  If page_url provided: naturally drive to reading more / listening.
-  If discount_code provided: mention it naturally in the body.
-- from_label: "Alan from Beezy Beez" for personal/lapsed,
-              "Beezy Beez" for promotional.
-- image_prompt: 12-word Higgsfield prompt. Woman 50+, warm honey tones,
-  editorial lifestyle, real human face, no text.
+
+SUBJECT LINE RULES:
+- 6-9 words, curiosity-driven, personal. No clickbait.
+- Personalization: {{ first_name }} — this is the ONLY format that works in Klaviyo subject lines.
+- NEVER use {{ person.first_name|default:'there' }} in the subject — it renders as raw text.
+
+PREVIEW TEXT:
+- Under 90 chars, extends the subject naturally.
+
+BODY RULES:
+- 3 short paragraphs. Opens with a specific person or moment.
+- Personalization in body: {{ person.first_name|default:'there' }} — this is the body format.
+- If page_url provided: naturally drive to reading more / listening.
+- If discount_code provided: mention it naturally in the body.
+- CTA links directly to the collection or discount URL. NEVER to a separate landing page for customer audiences.
+
+FROM LABEL:
+- "Alan from Beezy Beez" for personal/JSH/lapsed/educational
+- "Beezy Beez" for promotional/product
+
+OFFER RULES BY AUDIENCE:
+- VIP, inner_circle, whales, high_aov, active_seal: NEVER offer discounts, BOGO, or credits.
+  Instead: insider knowledge, product recommendations, educational science, early access, personal check-ins.
+- lapsed_30d: JSH check-ins from Alan, $25 credit occasionally. No deep discounts.
+- lapsed_90d+, lapsed_180d+: deep discounts OK (35-40% off), reactivation offers.
+- one_time_buyers: $25 credit, BOGO, product features.
+- engaged_customers: product features, sleep stories, seasonal content.
+
+IMAGE PROMPT RULES:
+- 15-word Higgsfield prompt. MUST include a real human woman aged 50+.
+- Warm amber/golden/honey tones (#8b4513 palette). Photorealistic, editorial lifestyle.
+- Women depicted: diverse ethnicities, age-appropriate, never stock-photo generic.
+- NEVER: "woman reading a book", sad/lonely scenes, no-people scenes, cold blue tones.
+- VARY the scene each campaign: bedroom, kitchen, garden, patio, yoga, walking in nature, tea time.
+- Include honey jar in roughly 40% of images.
 
 Output ONLY valid JSON:
 {
@@ -229,17 +268,21 @@ Output ONLY valid JSON:
   "preview_text": "under 90 chars",
   "from_label": "Alan from Beezy Beez",
   "body_paragraphs": ["para 1", "para 2", "para 3"],
-  "cta_text": "READ MORE",
-  "image_prompt": "12-word prompt"
+  "cta_text": "SHOP NOW",
+  "image_prompt": "15-word prompt with human woman 50+"
 }"""
 
 
 def _generate_copy(slot: dict, page_url: str = "", discount_code: str = "") -> dict:
     key = os.environ.get("BEEZY_ANTHROPIC_API_KEY")
     client = anthropic.Anthropic(api_key=key)
+    aud_key = slot.get("audience", "?").lower().replace(" ", "_")
+    aud_type = "HIGH_VALUE_CUSTOMER" if aud_key in HIGH_VALUE_SEGMENTS else (
+               "CUSTOMER" if aud_key in CUSTOMER_SEGMENTS else "PROSPECT")
     context = (
         "Campaign type: " + slot.get("content_type", "") + "\n"
         "Audience: " + slot.get("audience", "?") + "\n"
+        "Audience type: " + aud_type + " — follow the OFFER RULES for this type.\n"
         "Topic: " + slot.get("topic_angle", "") + "\n"
         "Send time: " + slot.get("send_time_est", "14:00") + " EST"
     )
@@ -483,11 +526,17 @@ def run(slot: dict) -> dict:
     if discount_code:
         cta_url = "https://trybeezybeez.com/discount/" + discount_code + "?redirect=/pages/bf-collection"
     else:
-        cta_url = "https://trybeezybeez.com/products/honey-sub"
+        cta_url = "https://trybeezybeez.com/pages/bf-collection"
 
-    # Landing page (if needed)
+    # RULE: Customer segments NEVER go to a landing page — direct to collection/discount
+    audience_key = slot.get("audience", "").lower().replace(" ", "_")
+    is_customer = audience_key in CUSTOMER_SEGMENTS
+    if is_customer and not discount_code:
+        cta_url = "https://trybeezybeez.com/pages/bf-collection"
+
+    # Landing page (if needed — but NEVER for customer segments)
     page_url = ""
-    if _needs_page(slot):
+    if _needs_page(slot) and not is_customer:
         print("[beezy_campaign] Creating landing page...")
         page_content = _generate_page_content(slot, discount_code)
         page_html    = _build_page_html(page_content, discount_code, cta_url)
@@ -500,6 +549,36 @@ def run(slot: dict) -> dict:
     print("[beezy_campaign] Generating copy...")
     copy = _generate_copy(slot, page_url, discount_code)
     print("[beezy_campaign]   Subject: " + copy.get("subject",""))
+
+    # ── VALIDATOR GATE ──────────────────────────────────────────────────
+    from db.connection import get_conn as _get_validator_conn
+    print("[beezy_campaign] Running validator...")
+    try:
+        with _get_validator_conn() as vconn:
+            validation = validate_campaign(vconn, slot, copy, cta_url)
+    except Exception as ve:
+        print("[beezy_campaign] Validator error (proceeding with caution): " + str(ve))
+        validation = {"pass": True, "verdict": "ERROR", "slack_block": "Validator error: " + str(ve)}
+
+    if not validation["pass"]:
+        print("[beezy_campaign] ❌ VALIDATOR BLOCKED: " + validation["verdict"])
+        # Post failure to Slack — do NOT create campaign
+        from lib.slack import post_draft
+        post_draft(
+            title="❌ Campaign Blocked by Validator",
+            summary_lines=[validation["slack_block"]],
+            body="Slot: " + json.dumps(slot, indent=2)[:500],
+        )
+        return "blocked:" + validation["verdict"]
+
+    print("[beezy_campaign] ✅ Validator PASSED")
+    # Post validation report to Slack regardless
+    from lib.slack import post_draft as _post_validation
+    _post_validation(
+        title="✅ Validator Passed — deploying",
+        summary_lines=[validation["slack_block"][:500]],
+        body="",
+    )
 
     # Image
     prompt  = copy.get("image_prompt", "Woman 50 warm honey tones editorial lifestyle real human face")
@@ -523,9 +602,18 @@ def run(slot: dict) -> dict:
         print("[beezy_campaign] Assigning template...")
         _assign_template(message_id, template_id)
 
-    # Slack notify
+    # Auto-schedule — campaign goes from Draft → Scheduled
+    print("[beezy_campaign] Auto-scheduling...")
+    sched_result = schedule_campaign(campaign_id, slot)
+    if sched_result["scheduled"]:
+        sched_note = "✅ Scheduled for " + sched_result["send_time"]
+    else:
+        sched_note = "⚠️ Draft only — " + sched_result.get("error", "unknown")
+    print("[beezy_campaign]   " + sched_note)
+
+    # Slack notify (include schedule status)
     _slack_notify(slot, copy, campaign_id, page_url, cdn_url)
 
     camp_url = "https://www.klaviyo.com/campaign/" + campaign_id + "/wizard"
-    print("[beezy_campaign]   Done: " + camp_url)
+    print("[beezy_campaign]   Done: " + camp_url + " | " + sched_note)
     return {"campaign_url": camp_url, "page_url": page_url, "campaign_id": campaign_id}

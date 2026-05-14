@@ -78,7 +78,7 @@ _LAST_READ: dict[str, str] = {}
 
 
 def _get_last_read_ts(conn, channel: str) -> str:
-    return _LAST_READ.get(channel, str(time.time() - 300))  # default: last 5 min
+    return _LAST_READ.get(channel, str(time.time()))  # default: last 5 min
 
 
 def _save_last_read_ts(conn, channel: str, ts: str) -> None:
@@ -247,7 +247,14 @@ HELP_TEXT = """*Beezy Agent Commands* — type any of these in #beezy-agents:
 `what is revenue` — pull today's pacing data
 `deploy latest episode` — deploy from #beezy-new-episodes
 `status` — see today's dispatch log
-`help` — show this list"""
+`help` — show this list
+
+*Performance:*
+`run backfill` — pull revenue for campaigns sent 3+ days ago
+`weekly review` — run the weekly performance review now
+`pacing check` — mid-month pacing check
+`monthly review` — run the monthly retrospective
+`flow check` — run flow health check"""
 
 MODIFY_SYSTEM = """You are a calendar editor for Beezy Beez Honey email marketing.
 
@@ -513,6 +520,11 @@ HANDLERS = {
     "deploy_episode":    lambda conn, _: _handle_deploy_episode(conn),
     "status":            lambda conn, _: _handle_status(conn),
     "help":              lambda conn, _: HELP_TEXT,
+    "flow_check":        lambda conn, _: _handle_flow_check(),
+    "run_backfill":      lambda conn, _: _handle_backfill(),
+    "weekly_review":     lambda conn, _: _handle_weekly_review(),
+    "pacing_check":      lambda conn, _: _handle_pacing_check(),
+    "monthly_review":    lambda conn, _: _handle_monthly_review(),
     "view_calendar":     _handle_view_calendar,
     "modify_calendar":   _handle_modify_calendar,
     "query_calendar":    _handle_query_calendar,
@@ -551,11 +563,18 @@ def _process_beezy_agents(conn) -> None:
                 "approved": {"action": "approve_calendar"},
                 "approved week": {"action": "approve_week"},
                 "approved today": {"action": "approve_day", "params": {"day": "today"}},
+                "approve today": {"action": "approve_day", "params": {"day": "today"}},
                 "deploy campaigns": {"action": "deploy_today"},
                 "generate calendar": {"action": "generate_calendar"},
                 "run weekly brief": {"action": "run_weekly_brief"},
                 "deploy latest episode": {"action": "deploy_episode"},
                 "restore calendar": {"action": "restore_calendar"},
+                "run backfill": {"action": "run_backfill"},
+                "weekly review": {"action": "weekly_review"},
+                "pacing check": {"action": "pacing_check"},
+                "monthly review": {"action": "monthly_review"},
+                "flow check": {"action": "flow_check"},
+                "flow health": {"action": "flow_check"},
             }
             result = fast_match.get(text_lower)
             if result:
@@ -627,6 +646,34 @@ def _get_bot_id() -> str:
 
 
 # ── Main entry ────────────────────────────────────────────────────────────────
+
+
+
+def _handle_flow_check():
+    from workers.flow_monitor import run_flow_check
+    result = run_flow_check()
+    return "Flow health check posted above."
+
+def _handle_backfill():
+    from workers.revenue_backfill import run_backfill
+    result = run_backfill()
+    return "Revenue backfill complete: " + str(result)
+
+def _handle_weekly_review():
+    from workers.learning_loop import run_weekly
+    result = run_weekly()
+    return "Weekly review posted above."
+
+def _handle_pacing_check():
+    from workers.learning_loop import run_biweekly
+    result = run_biweekly()
+    return "Pacing check posted above."
+
+def _handle_monthly_review():
+    from workers.learning_loop import run_monthly
+    result = run_monthly()
+    return "Monthly review posted above."
+
 
 def run_once() -> None:
     """Called every 2 minutes by cron_dispatch.py."""
