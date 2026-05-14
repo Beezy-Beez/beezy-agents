@@ -399,9 +399,10 @@ def pull_klaviyo_audience_health() -> list:
         "page[size]": "50",
     }
     page = 0
-    while url and page < 10:
+    # 5 pages × 50 = 250 campaigns, covers ~2 years of weekly sends
+    while url and page < 5:
         try:
-            resp = _httpx.get(url, headers=headers, params=params, timeout=20)
+            resp = _httpx.get(url, headers=headers, params=params, timeout=15)
             if not resp.is_success:
                 break
             body = resp.json()
@@ -424,7 +425,7 @@ def pull_klaviyo_audience_health() -> list:
             url = body.get("links", {}).get("next") if not stop else None
             params = {}
             page += 1
-            _t.sleep(0.25)
+            _t.sleep(0.1)
         except Exception:
             break
 
@@ -617,7 +618,7 @@ def _learning_loop() -> dict:
         "SELECT component, strategy_text, created_at FROM strategies "
         "WHERE component='learning_loop' ORDER BY created_at DESC LIMIT 3"
     )
-    result = {"entries": [], "rpr_by_audience": {}}
+    result: dict = {"entries": [], "rpr_by_audience": {}}
     for r in rows:
         try:
             data = r[1] if isinstance(r[1], dict) else json.loads(r[1])
@@ -630,6 +631,28 @@ def _learning_loop() -> dict:
             })
         except Exception:
             pass
+
+    # If no learning_loop strategies yet, fall back to Klaviyo audience health cache
+    if not result["rpr_by_audience"]:
+        row = _q1("SELECT value FROM agent_state WHERE key='audience_health'")
+        if row:
+            try:
+                d = json.loads(row[0])
+                aud_list = d if isinstance(d, list) else d.get("data", [])
+                result["rpr_by_audience"] = {
+                    a["audience"]: a["rpr_90d"]
+                    for a in aud_list if a.get("rpr_90d", 0) > 0
+                }
+                if result["rpr_by_audience"] and not result["entries"]:
+                    as_of = d.get("as_of", "") if isinstance(d, dict) else ""
+                    result["entries"].append({
+                        "component": "audience_health",
+                        "summary": f"90-day RPR by audience — {len(result['rpr_by_audience'])} audiences tracked (from Klaviyo history)",
+                        "at": as_of,
+                    })
+            except Exception:
+                pass
+
     return result
 
 
