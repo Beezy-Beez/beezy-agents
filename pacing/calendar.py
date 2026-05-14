@@ -211,10 +211,15 @@ def _build_context(month_start: date) -> str:
     upcoming     = _fetch_upcoming_issues()
     last_issue   = _fetch_last_published_issue()
 
+    seg_data = _fetch_segment_rpr()
+
     ctx = {
         "brand": "Beezy Beez Honey — DTC botanical extract honey, women 50+, sleep support, ~$54.95 AOV",
         "planning_month": str(month_start)[:7],
+        "planning_period_first_day": str(month_start),
+        "planning_period_last_day": str(month_end - __import__("datetime").timedelta(days=1)),
         "days_in_month": days_in_month,
+        "IMPORTANT": "Generate slots covering ALL days from planning_period_first_day through planning_period_last_day inclusive. Do not stop before the last day.",
         "goals_and_pacing": pacing,
         "performance_90d": perf,
         "top_campaign_contributors_90d": [
@@ -243,6 +248,7 @@ def _build_context(month_start: date) -> str:
             "Sniper follow-ups to non-openers are standard and expected. Best send time: 2pm EDT."
         ),
     }
+    ctx["segment_rpr_data"] = seg_data.get("context_text", "")
     return json.dumps(ctx, indent=2, default=str)
 
 
@@ -273,6 +279,23 @@ SMS: max 2x/month. High-value moments only (VIP credit, flash close, restock).
 FLOW EXPERIMENTS: 1–2 per week. No revenue. Critical to growing flow contribution %.
 
 SEO BLOG: 4–6/month, spread evenly. revenue_estimate = 0. No email send involved.
+
+WEEKEND RULE: ALL 7 DAYS ARE VALID SEND DAYS. Do NOT skip Saturdays or Sundays.
+  Women 50+ check email on weekends. Distribute sends evenly across all 7 days of the week.
+
+2026 HOLIDAYS (use for themed campaigns where relevant to sleep/honey/wellness/gifting):
+  May 25 Memorial Day, Jun 19 Juneteenth, Jul 3/4 Independence Day,
+  Sep 7 Labor Day, Oct 31 Halloween, Nov 11 Veterans Day,
+  Nov 26 Thanksgiving, Nov 27 Black Friday, Nov 28 Small Business Saturday,
+  Dec 24-25 Christmas, Dec 31 New Year's Eve
+  Brand-relevant: Mother's Day May 10, Earth Day Apr 22, Valentine's Feb 14
+
+LANDING PAGES:
+- Set needs_page: true when the email angle is content-driven (sleep science, research,
+  story, discovery, audio, meditation). The system will create a Shopify page first,
+  then build the email to drive traffic there.
+- Set needs_page: false for pure offer/discount/reactivation emails — those link
+  directly to the product or discount URL. No page needed.
 
 DISCOUNT CODES (include for win-back / lapsed / flash sale / VIP slots):
 - Add discount_code (e.g. SLEEP20, HONEY30, WAKE25 — ALL CAPS, max 10 chars) and
@@ -319,6 +342,7 @@ OUTPUT: valid JSON only. No markdown, no preamble, no trailing text. Schema:
       "send_time_est": "14:00",
       "priority": "high|medium|low",
       "revenue_estimate": 1250.00,
+      "needs_page": false,
       "discount_code": "SLEEP20",
       "discount_pct": 20,
       "rationale": "Why this slot — cite specific data (segment last touched X days, drove $Y in 90d)",
@@ -360,6 +384,32 @@ def _repair_json(raw: str) -> dict:
     raise ValueError("Could not repair malformed JSON from Opus response.")
 
 
+def _fetch_segment_rpr() -> dict:
+    """
+    Pull actual RPR by segment from performance + calendar_executions tables.
+    Falls back to conservative estimates if no real data.
+    """
+    from pacing.calendar_live_data import (
+        get_performance_by_segment, get_pacing_context,
+        build_performance_context_text, FALLBACK_RPR, FALLBACK_LIST_SIZE
+    )
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            perf   = get_performance_by_segment(conn)
+            pacing = get_pacing_context(conn)
+        return {"perf": perf, "pacing": pacing,
+                "context_text": build_performance_context_text(perf, pacing)}
+    except Exception as ex:
+        print("[calendar] _fetch_segment_rpr failed: " + str(ex))
+        # Build fallback text
+        lines = ["=== PERFORMANCE DATA (estimated — no real data available) ==="]
+        for aud, rpr in FALLBACK_RPR.items():
+            size = FALLBACK_LIST_SIZE.get(aud, 4000)
+            lines.append(f"  {aud:<22} RPR ${rpr:.3f}  list ~{size:,}  ≈ ${rpr*size:,.0f}/send  (estimated)")
+        return {"perf": {}, "pacing": {}, "context_text": "\n".join(lines)}
+
+
 def _call_opus(context_str: str) -> dict:
     api_key = os.environ.get("BEEZY_ANTHROPIC_API_KEY")
     if not api_key:
@@ -373,8 +423,13 @@ def _call_opus(context_str: str) -> dict:
             "role": "user",
             "content": (
                 "Here is the current performance and planning context. "
-                "Generate the content calendar for the planning month. "
-                "Keep each text field under 120 characters — be concise and data-specific.\n\n"
+                "Generate the content calendar for the FULL calendar month shown below. "
+                "Cover EVERY day from the 1st through the last day of the month — do not stop early. "
+                "Include weekends (Sat + Sun). All 7 days are valid send days. "
+                "Keep each text field under 120 characters — be concise and data-specific.\n"
+                "USE THE SEGMENT RPR DATA to set revenue_estimate per slot. "
+                "Do NOT invent revenue numbers. "
+                "The pacing gap tells you how aggressive to be.\n\n"
                 + context_str
             ),
         }],
@@ -407,154 +462,101 @@ def _call_opus(context_str: str) -> dict:
 # ── HTML report ───────────────────────────────────────────────────────────────
 
 def _generate_html_report(month_start: date, cal: dict) -> str:
-    month_label   = month_start.strftime("%B %Y")
-    pacing_status = cal.get("pacing_status", "unknown")
-    gap           = cal.get("monthly_revenue_gap", 0)
-    daily_rate    = cal.get("required_daily_rate", 0)
-    summary       = cal.get("summary", "")
-    adjustments   = cal.get("goal_adjustments", [])
-    slots         = cal.get("slots", [])
-    counts        = cal.get("content_counts", {})
+    """Build calendar HTML with planned vs actual revenue columns."""
+    # Fetch actual revenue from calendar_executions
+    actual_by_date_audience: dict = {}
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT slot_date::text, audience, COALESCE(actual_revenue,0), status "
+                    "FROM calendar_executions WHERE slot_date >= %s",
+                    (month_start.isoformat(),)
+                )
+                for row in cur.fetchall():
+                    key = str(row[0]) + "|" + str(row[1])
+                    actual_by_date_audience[key] = {"revenue": float(row[2]), "status": row[3]}
+    except Exception as ex:
+        print("[calendar] actual revenue fetch failed: " + str(ex))
 
-    pacing_color = {"behind": "#c0392b", "on-track": "#27ae60", "ahead": "#2980b9"}.get(
-        pacing_status, "#666"
-    )
+    slots    = cal.get("slots", [])
+    month_lbl = month_start.strftime("%B %Y")
 
-    # Build adjustments HTML
-    adj_html = "".join(f"<li>{a}</li>" for a in adjustments)
+    planned_total = sum(float(s.get("revenue_estimate", 0)) for s in slots)
+    actual_total  = sum(v["revenue"] for v in actual_by_date_audience.values())
 
-    # Build table rows
     rows_html = ""
     for s in slots:
-        ct      = s.get("content_type", "")
-        color   = CONTENT_TYPE_COLORS.get(ct, "#444")
-        badge   = f'<span style="background:{color};color:#fff;padding:2px 8px;border-radius:3px;font-size:12px;white-space:nowrap;">{ct}</span>'
-        rev_est = s.get("revenue_estimate", 0)
-        rev_str = f"${rev_est:,.0f}" if rev_est else "—"
-        pri     = s.get("priority", "")
-        pri_color = {"high": "#c0392b", "medium": "#e67e22", "low": "#27ae60"}.get(pri, "#666")
-        rows_html += f"""
-        <tr>
-          <td style="white-space:nowrap;font-weight:bold;">{s.get('date','')}</td>
-          <td style="white-space:nowrap;">{s.get('day_of_week','')[:3]}</td>
-          <td>{badge}</td>
-          <td>{s.get('channel','')}</td>
-          <td>{s.get('audience','')}</td>
-          <td>{s.get('topic_angle','')}</td>
-          <td style="white-space:nowrap;">{s.get('send_time_est','')}</td>
-          <td style="font-weight:bold;color:{color};white-space:nowrap;">{rev_str}</td>
-          <td style="color:{pri_color};font-weight:bold;">{pri}</td>
-          <td style="font-size:13px;">{s.get('rationale','')}</td>
-          <td style="font-size:13px;">{s.get('goal_alignment','')}</td>
-          <td style="font-size:13px;color:#666;">{s.get('adjustment_lever','')}</td>
-        </tr>"""
+        key    = str(s.get("date","")) + "|" + str(s.get("audience",""))
+        actual = actual_by_date_audience.get(key, {})
+        act_rev = actual.get("revenue", 0)
+        status  = actual.get("status", "")
 
-    # Count badges
-    count_badges = "".join(
-        f'<span style="background:{CONTENT_TYPE_COLORS.get(k,"#666")};color:#fff;'
-        f'padding:4px 12px;border-radius:4px;margin:0 4px;font-size:13px;">'
-        f'{k}: <strong>{v}</strong></span>'
-        for k, v in counts.items() if v
-    )
+        status_badge = ""
+        if status == "completed":
+            status_badge = ' <span style="background:#27ae60;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;">sent</span>'
+        elif status == "dispatched":
+            status_badge = ' <span style="background:#2980b9;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;">queued</span>'
+        elif status == "failed":
+            status_badge = ' <span style="background:#e74c3c;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;">failed</span>'
 
-    total_rev_est = sum(s.get("revenue_estimate", 0) for s in slots
-                      if s.get("content_type") not in ("seo_blog", "flow_experiment"))
+        needs_page = "✓" if s.get("needs_page") else ""
+        disc_code  = s.get("discount_code","")
+        act_cell   = ("$" + f"{act_rev:,.0f}" if act_rev > 0 else "—")
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Content Calendar — {month_label}</title>
+        rows_html += (
+            "<tr>"
+            "<td>" + str(s.get("date","")) + "</td>"
+            "<td>" + str(s.get("content_type","")) + "</td>"
+            "<td>" + str(s.get("audience","")) + "</td>"
+            "<td>" + str(s.get("topic_angle",""))[:60] + "</td>"
+            "<td>" + str(s.get("send_time_est","")) + "</td>"
+            "<td>" + str(s.get("priority","")) + "</td>"
+            "<td style=\"text-align:right\">$" + f"{float(s.get('revenue_estimate',0)):,.0f}" + "</td>"
+            "<td style=\"text-align:right;font-weight:bold\">" + act_cell + "</td>"
+            "<td>" + needs_page + "</td>"
+            "<td><code>" + disc_code + "</code></td>"
+            "<td>" + str(s.get("rationale",""))[:80] + status_badge + "</td>"
+            "</tr>\n"
+        )
+
+    return """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>Content Calendar — """ + month_lbl + """</title>
 <style>
-  body {{ font-family:Georgia,serif; background:#faf6ee; color:#2c2417; margin:0; padding:24px; }}
-  h1 {{ font-size:28px; margin:0 0 4px; }}
-  .meta {{ font-size:14px; color:#8b7355; margin:0 0 24px; }}
-  .pacing-banner {{ padding:16px 20px; border-radius:6px; margin:0 0 24px;
-    background:{pacing_color}22; border-left:4px solid {pacing_color}; }}
-  .pacing-banner h2 {{ margin:0 0 6px; color:{pacing_color}; font-size:18px; }}
-  .pacing-banner p {{ margin:0; font-size:15px; line-height:1.6; }}
-  .stats {{ display:flex; gap:20px; margin:0 0 24px; flex-wrap:wrap; }}
-  .stat-box {{ background:#fffdf7; border:1px solid #e8dcc8; border-radius:6px;
-    padding:14px 20px; min-width:160px; }}
-  .stat-box .label {{ font-size:12px; color:#8b7355; text-transform:uppercase;
-    letter-spacing:1px; margin:0 0 4px; }}
-  .stat-box .value {{ font-size:22px; font-weight:bold; color:#2c2417; margin:0; }}
-  .adjustments {{ background:#fffdf7; border:1px solid #d4a847; border-radius:6px;
-    padding:20px 24px; margin:0 0 28px; }}
-  .adjustments h3 {{ margin:0 0 12px; font-size:16px; color:#8b4513; }}
-  .adjustments ul {{ margin:0; padding-left:20px; }}
-  .adjustments li {{ margin:0 0 8px; font-size:15px; line-height:1.5; }}
-  .counts {{ margin:0 0 20px; }}
-  .table-wrap {{ overflow-x:auto; }}
-  table {{ border-collapse:collapse; width:100%; min-width:1200px;
-    background:#fffdf7; border-radius:6px; overflow:hidden; font-size:14px; }}
-  th {{ background:#2c2417; color:#fffdf7; padding:10px 12px; text-align:left;
-    white-space:nowrap; font-size:12px; letter-spacing:0.5px; }}
-  td {{ padding:10px 12px; border-bottom:1px solid #f0e8d8; vertical-align:top; }}
-  tr:hover td {{ background:#fdf5e6; }}
-  .total-row td {{ background:#f5f0e8; font-weight:bold; border-top:2px solid #d4a847; }}
-  footer {{ margin:32px 0 0; font-size:12px; color:#8b7355; text-align:center; }}
-</style>
-</head>
-<body>
-<h1>📅 Content Calendar — {month_label}</h1>
-<p class="meta">Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} ET · Beezy Beez Honey</p>
-
-<div class="pacing-banner">
-  <h2>Pacing Status: {pacing_status.upper()}</h2>
-  <p>{summary}</p>
+body{font-family:-apple-system,sans-serif;background:#f8f4ed;color:#2c2417;padding:20px;}
+h1{color:#8b4513;font-size:28px;margin:0 0 4px;}
+.summary{display:flex;gap:20px;margin:16px 0 24px;flex-wrap:wrap;}
+.card{background:#fff;border-radius:8px;padding:14px 20px;min-width:160px;
+  box-shadow:0 1px 4px rgba(0,0,0,.08);}
+.card .label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#8b7355;margin-bottom:4px;}
+.card .value{font-size:22px;font-weight:600;color:#2c2417;}
+.card.warn .value{color:#c0392b;}
+.card.good .value{color:#27ae60;}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;
+  overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);font-size:13px;}
+th{background:#8b4513;color:#fff;padding:10px 12px;text-align:left;font-weight:500;}
+td{padding:9px 12px;border-bottom:1px solid #f0e8d8;vertical-align:top;}
+tr:last-child td{border-bottom:none;}
+tr:hover td{background:#fdf5e6;}
+code{background:#f0e8d8;padding:2px 5px;border-radius:3px;font-size:12px;}
+</style></head><body>
+<h1>Content Calendar — """ + month_lbl + """</h1>
+<p style="color:#8b7355;margin:0 0 16px;">""" + str(len(slots)) + """ slots &middot; Generated """ + str(month_start.today()) + """</p>
+<div class="summary">
+  <div class="card"><div class="label">Planned Revenue</div><div class="value">$""" + f"{planned_total:,.0f}" + """</div></div>
+  <div class="card """ + ("good" if actual_total > 0 else "") + """"><div class="label">Actual Revenue</div><div class="value">$""" + f"{actual_total:,.0f}" + """</div></div>
+  <div class="card"><div class="label">Total Slots</div><div class="value">""" + str(len(slots)) + """</div></div>
+  <div class="card"><div class="label">Campaigns</div><div class="value">""" + str(sum(1 for s in slots if "campaign" in s.get("content_type",""))) + """</div></div>
+  <div class="card"><div class="label">SMS</div><div class="value">""" + str(sum(1 for s in slots if "sms" in s.get("content_type",""))) + """</div></div>
 </div>
-
-<div class="stats">
-  <div class="stat-box">
-    <p class="label">Revenue Gap</p>
-    <p class="value" style="color:{pacing_color};">${gap:,.0f}</p>
-  </div>
-  <div class="stat-box">
-    <p class="label">Required Daily Rate</p>
-    <p class="value">${daily_rate:,.0f}/day</p>
-  </div>
-  <div class="stat-box">
-    <p class="label">Total Slots</p>
-    <p class="value">{len(slots)}</p>
-  </div>
-  <div class="stat-box">
-    <p class="label">Projected Revenue</p>
-    <p class="value" style="color:#27ae60;">${total_rev_est:,.0f}</p>
-  </div>
-</div>
-
-<div class="adjustments">
-  <h3>🎯 Recommended Adjustments to Exceed Goals</h3>
-  <ul>{adj_html}</ul>
-</div>
-
-<div class="counts">{count_badges}</div>
-
-<div class="table-wrap">
 <table>
-<thead>
-<tr>
-  <th>Date</th><th>Day</th><th>Type</th><th>Channel</th><th>Audience</th>
-  <th>Topic / Angle</th><th>Send Time</th><th>Rev. Est.</th><th>Priority</th>
-  <th>Rationale</th><th>Goal Alignment</th><th>If It Underperforms</th>
-</tr>
-</thead>
-<tbody>
-{rows_html}
-<tr class="total-row">
-  <td colspan="7">Projected total</td>
-  <td>${total_rev_est:,.0f}</td>
-  <td colspan="4"></td>
-</tr>
-</tbody>
+<tr><th>Date</th><th>Type</th><th>Audience</th><th>Topic</th><th>Time</th>
+<th>Priority</th><th>Planned $</th><th>Actual $</th><th>Page</th><th>Discount</th><th>Rationale</th></tr>
+""" + rows_html + """
 </table>
-</div>
-
-<footer>Beezy Beez · Content Calendar · {month_label} · Decision stored in decisions table</footer>
-</body>
-</html>"""
+</body></html>"""
 
 
 def _save_html_report(month_start: date, html: str) -> str:
@@ -721,10 +723,11 @@ def generate(month_start: date) -> dict:
     return cal
 
 
-def run_monthly() -> dict:
-    """Monthly entrypoint — triggered by cron_dispatch.py on the 1st of each month."""
-    today = date.today()
-    month_start = date(today.year, today.month, 1)
+def run_monthly(month_start: date | None = None) -> dict:
+    """Generate calendar for given month (defaults to next month when called 1 week before EOM)."""
+    if month_start is None:
+        today = date.today()
+        month_start = date(today.year, today.month, 1)
     try:
         return generate(month_start)
     except Exception as e:

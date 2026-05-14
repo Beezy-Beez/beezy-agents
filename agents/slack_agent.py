@@ -13,7 +13,7 @@ Commands Boris can type in #beezy-agents:
   "run weekly brief"   → post next 7 days to Slack now
   "deploy latest episode" → trigger episode deployer pipeline
   Any other message    → Claude interprets and acts or explains
- BEEZY_AGENTS_CHANNEL = "C0B3DEUJS9G"
+
 Also watches #beezy-new-episodes for ready episodes and deploys them
 to Klaviyo automatically using the correct REST endpoints.
 """
@@ -28,8 +28,19 @@ import anthropic
 import httpx
 
 SLACK_BOT_TOKEN  = os.environ.get("SLACK_BOT_TOKEN", "")
-BEEZY_AGENTS_CHANNEL = "C0B3DEUJS9G"   # #beezy-agents — update if different
-NEW_EPISODES_CHANNEL = "C0B3S0CM2JV"   # #beezy-new-episodes — update with correct ID
+# LOCKED CHANNEL IDs — confirmed May 2026 — DO NOT CHANGE
+# #beezy-agents:       C0B3DEUJS9G  (Boris command channel)
+# #beezy-new-episodes: C0B3S0CM2JV  (episode auto-deploy)
+BEEZY_AGENTS_CHANNEL = "C0B3DEUJS9G"
+NEW_EPISODES_CHANNEL  = "C0B3S0CM2JV"
+
+def _assert_channel_ids() -> None:
+    """Runtime guard — corrects channel IDs if any installer wrote wrong values."""
+    global BEEZY_AGENTS_CHANNEL, NEW_EPISODES_CHANNEL
+    BEEZY_AGENTS_CHANNEL = "C0B3DEUJS9G"
+    NEW_EPISODES_CHANNEL  = "C0B3S0CM2JV"
+
+_assert_channel_ids()
 SLACK_API = "https://slack.com/api"
 MODEL = "claude-sonnet-4-6"
 
@@ -108,6 +119,13 @@ Actions you can take:
 - "pause_slot" — params: {content_type, date} — skip a slot
 - "status" — report what's running today
 - "clarify" — ask Boris for more information
+- "modify_calendar" — params: {"request": "natural language description of change"}
+  Use when Boris wants to add/remove/change slots in the calendar. E.g. "add more SMS",
+  "remove flow experiments", "change VIP campaign to Friday", "max 2 emails per day"
+- "query_calendar" — params: {"question": "what Boris wants to know about the calendar"}
+  Use when Boris asks about the calendar: "what's planned for Thursday?",
+  "how many SMS do we have?", "show me next week"
+- "help" — post the full list of available commands
 - "none" — no action needed, just respond
 
 Always be concise. Boris is busy. No fluff."""
@@ -218,15 +236,178 @@ def _handle_status(conn) -> str:
     return "\n".join(lines)
 
 
+HELP_TEXT = """*Beezy Agent Commands* — type any of these in #beezy-agents:
+
+*Calendar:*
+`approved` — approve the monthly calendar
+`approved week` — approve the next 7 days
+`generate calendar` — regenerate this month's calendar
+`run weekly brief` — post next 7 days to Slack now
+
+*Conversational edits (just describe what you want):*
+"add 2 more SMS campaigns this month targeting VIPs"
+"remove all flow experiments from the calendar"
+"move the Wednesday campaign to Friday"
+"max 2 emails per day for the rest of May"
+"what's planned for next week?"
+"how many SMS campaigns do we have left?"
+
+*Operations:*
+`deploy campaigns` — run today's orchestrator now
+`what is revenue` — pull today's pacing data
+`deploy latest episode` — deploy from #beezy-new-episodes
+`status` — see today's dispatch log
+`help` — show this list"""
+
+MODIFY_SYSTEM = """You are a calendar editor for Beezy Beez Honey email marketing.
+
+Given a change request, return ONLY a JSON object describing what to add or remove.
+Do NOT return the full calendar. Return ONLY this schema:
+
+{
+  "action": "add" | "remove" | "update",
+  "description": "brief human description of what changed",
+  "slots_to_add": [...],
+  "slots_to_remove_by_date_and_type": [{"date": "YYYY-MM-DD", "content_type": "..."}]
+}
+
+slots_to_add must match the full slot schema:
+{"date":"YYYY-MM-DD","content_type":"...","channel":"email|sms","audience":"...",
+ "topic_angle":"...","send_time_est":"HH:MM","priority":"high|medium|low",
+ "revenue_estimate":0,"needs_page":false,"discount_code":"","discount_pct":0,
+ "rationale":"...","goal_alignment":"...","adjustment_lever":"..."}
+
+Return ONLY valid JSON. No prose. No markdown."""
+
+
+def _handle_modify_calendar(conn, params: dict) -> str:
+    request = params.get("request", "")
+    if not request:
+        return "What change would you like to make to the calendar?"
+
+    month = date.today().strftime("%Y-%m")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, output FROM decisions WHERE decision_type='calendar_plan' "
+            "AND output->>'month'=%s ORDER BY created_at DESC LIMIT 1",
+            (month,)
+        )
+        row = cur.fetchone()
+    if not row:
+        return "No calendar found for " + month + ". Generate one first."
+
+    decision_id = str(row[0])
+    calendar    = row[1] if isinstance(row[1], dict) else json.loads(row[1])
+    slots       = calendar.get("slots", [])
+
+    import os as _os
+    key = _os.environ.get("BEEZY_ANTHROPIC_API_KEY")
+    client = anthropic.Anthropic(api_key=key)
+
+    # Pass only a summary of existing slots to avoid token overflow
+    slot_summary = [
+        {"date": s.get("date"), "content_type": s.get("content_type"),
+         "audience": s.get("audience"), "topic_angle": s.get("topic_angle","")[:40]}
+        for s in slots
+    ]
+    msg = client.messages.create(
+        model=MODEL, max_tokens=2048, system=MODIFY_SYSTEM,
+        messages=[{"role": "user", "content":
+            "Existing slots summary:\n" + json.dumps(slot_summary, indent=2) +
+            "\n\nChange request: " + request
+        }],
+    )
+    raw = msg.content[0].text.strip()
+    s, e = raw.find("{"), raw.rfind("}")
+    if s == -1:
+        return "Could not parse the edit instructions. Try rephrasing."
+
+    diff = json.loads(raw[s:e+1])
+
+    # Apply diff to existing slots (never replace the whole calendar)
+    to_remove = {
+        (r.get("date"), r.get("content_type"))
+        for r in diff.get("slots_to_remove_by_date_and_type", [])
+    }
+    new_slots = [s for s in slots if (s.get("date"), s.get("content_type")) not in to_remove]
+    new_slots += diff.get("slots_to_add", [])
+    new_slots.sort(key=lambda s: s.get("date",""))
+
+    calendar["slots"] = new_slots
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE decisions SET output=%s::jsonb WHERE id=%s",
+            (json.dumps(calendar), decision_id)
+        )
+    conn.commit()
+
+    # Republish Shopify calendar page
+    try:
+        from pacing.calendar import run_monthly
+        from datetime import date as _date
+        month_start = _date(date.today().year, date.today().month, 1)
+        # Use internal republish path
+        from pacing.calendar import _generate_html_report, _publish_calendar_page
+        html = _generate_html_report(month_start, calendar)
+        page_url = _publish_calendar_page(month_start, html)
+    except Exception as ex:
+        page_url = "(page update failed: " + str(ex) + ")"
+
+    added   = len(diff.get("slots_to_add", []))
+    removed = len(diff.get("slots_to_remove_by_date_and_type", []))
+    desc    = diff.get("description", request)
+    return (
+        "Calendar updated for " + month + "\n"
+        + ("+" + str(added) + " slots added" if added else "")
+        + (" | -" + str(removed) + " slots removed" if removed else "")
+        + "\nChange: " + desc
+        + "\n" + page_url
+    )
+
+
+def _handle_query_calendar(conn, params: dict) -> str:
+    question = params.get("question", "")
+    month    = date.today().strftime("%Y-%m")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT output FROM decisions WHERE decision_type='calendar_plan' "
+            "AND output->>'month'=%s ORDER BY created_at DESC LIMIT 1",
+            (month,)
+        )
+        row = cur.fetchone()
+    if not row:
+        return "No calendar found for " + month + "."
+
+    calendar = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    slots    = calendar.get("slots", [])
+
+    import os as _os
+    key = _os.environ.get("BEEZY_ANTHROPIC_API_KEY")
+    client = anthropic.Anthropic(api_key=key)
+    msg = client.messages.create(
+        model=MODEL, max_tokens=512,
+        system="You answer questions about an email marketing calendar concisely. Be specific. Use bullet points if listing multiple slots.",
+        messages=[{"role": "user", "content":
+            "Calendar slots (JSON):\n" + json.dumps(slots, indent=2)[:5000] +
+            "\n\nQuestion: " + question
+        }],
+    )
+    return msg.content[0].text.strip()
+
+
 HANDLERS = {
-    "approve_calendar": lambda conn, _: _handle_approve_calendar(conn),
-    "approve_week":     lambda conn, _: _handle_approve_week(conn),
-    "deploy_today":     lambda conn, _: (_handle_deploy_today(), None)[0],
-    "revenue_query":    lambda conn, _: _handle_revenue_query(conn),
+    "approve_calendar":  lambda conn, _: _handle_approve_calendar(conn),
+    "approve_week":      lambda conn, _: _handle_approve_week(conn),
+    "deploy_today":      lambda conn, _: (_handle_deploy_today(), None)[0],
+    "revenue_query":     lambda conn, _: _handle_revenue_query(conn),
     "generate_calendar": lambda conn, _: _handle_generate_calendar(),
-    "run_weekly_brief": lambda conn, _: _handle_weekly_brief(),
-    "deploy_episode":   lambda conn, _: _handle_deploy_episode(conn),
-    "status":           lambda conn, _: _handle_status(conn),
+    "run_weekly_brief":  lambda conn, _: _handle_weekly_brief(),
+    "deploy_episode":    lambda conn, _: _handle_deploy_episode(conn),
+    "status":            lambda conn, _: _handle_status(conn),
+    "help":              lambda conn, _: HELP_TEXT,
+    "modify_calendar":   _handle_modify_calendar,
+    "query_calendar":    _handle_query_calendar,
 }
 
 
@@ -251,6 +432,9 @@ def _process_beezy_agents(conn) -> None:
         print(f"[slack_agent] Message from {user}: {text[:80]}")
 
         try:
+            # Immediately acknowledge so Boris knows message was received
+            _post_message(BEEZY_AGENTS_CHANNEL, "⏳ Got it — working on it...")
+
             result = _interpret_message(text)
             action   = result.get("action", "none")
             response = result.get("response", "")
@@ -260,15 +444,16 @@ def _process_beezy_agents(conn) -> None:
             if handler:
                 try:
                     action_response = handler(conn, params)
-                    reply = (action_response or "") + ("\n" + response if response else "")
+                    reply = action_response or "Done."
                 except Exception as e:
-                    reply = "Error running " + action + ": " + str(e)
+                    reply = "❌ Error: " + str(e)
             else:
                 reply = response or "Got it."
 
             _post_message(BEEZY_AGENTS_CHANNEL, reply)
         except Exception as e:
             print(f"[slack_agent] Error processing message: {e}")
+            _post_message(BEEZY_AGENTS_CHANNEL, "❌ Something went wrong: " + str(e)[:200])
 
         _save_last_read_ts(conn, "beezy_agents", ts)
 
