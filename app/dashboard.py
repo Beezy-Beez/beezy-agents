@@ -115,8 +115,8 @@ def _today_slots() -> list:
     today_iso = today.isoformat()
     month = today.strftime("%Y-%m")
 
-    # Load today's plan slots
-    plan_slots: dict[tuple, dict] = {}
+    # Load today's plan slots — this is the authoritative list
+    plan_slots: list[dict] = []
     drow = _q1(
         "SELECT output FROM decisions WHERE decision_type='calendar_plan' AND output->>'month'=%s "
         "ORDER BY created_at DESC LIMIT 1",
@@ -127,49 +127,51 @@ def _today_slots() -> list:
             payload = drow[0] if isinstance(drow[0], dict) else json.loads(drow[0])
             for s in payload.get("slots", []):
                 if s.get("date") == today_iso:
-                    k = (s.get("content_type", ""), s.get("audience", ""))
-                    plan_slots[k] = s
+                    plan_slots.append(s)
         except Exception:
             pass
 
-    # Load execution rows for today (deduped)
-    rows = _q(
-        """SELECT DISTINCT ON (content_type, audience)
-               id, content_type, audience, topic_angle, status, notes, actual_revenue, klaviyo_campaign_id
-           FROM calendar_executions
-           WHERE slot_date=%s
-           ORDER BY content_type, audience, id ASC""",
-        (today,)
-    )
-    exec_by_key: dict[tuple, dict] = {}
-    for r in rows:
-        k = (r[1], r[2])
-        exec_by_key[k] = {
-            "id": str(r[0]), "t": r[1], "a": r[2],
-            "tp": r[3] or "", "s": r[4],
-            "n": (r[5] or "")[:100], "rv": float(r[6] or 0), "kid": r[7] or ""
-        }
-
+    # For each plan slot, find the best execution row — prefer rows that have a
+    # Klaviyo campaign ID (proof the campaign was actually created), then fall
+    # back to any dispatched row, ordered newest-first to avoid stale duplicates.
     result = []
-    seen: set = set()
-
-    # Plan slots first — overlay with exec data where available
-    for k, s in plan_slots.items():
-        seen.add(k)
-        ex = exec_by_key.get(k)
-        if ex:
-            result.append(ex)
+    for s in plan_slots:
+        ct = s.get("content_type", "")
+        aud = s.get("audience", "")
+        # Best row = has a Klaviyo draft ID; among ties take most recent (id DESC)
+        rows = _q(
+            """SELECT id, status, notes, actual_revenue, klaviyo_campaign_id
+               FROM calendar_executions
+               WHERE slot_date=%s AND content_type=%s AND audience=%s
+               ORDER BY COALESCE((notes LIKE 'klaviyo_draft:%%'), false) DESC, id DESC
+               LIMIT 1""",
+            (today, ct, aud)
+        )
+        if rows:
+            r = rows[0]
+            notes = r[2] or ""
+            kid = r[4] or ""
+            # Extract campaign ID from notes if not stored in the dedicated column
+            if not kid and notes.startswith("klaviyo_draft:"):
+                kid = notes[len("klaviyo_draft:"):]
+            status = r[1]
+            # "dispatched" with no campaign ID and no meaningful notes = still pending/uncertain
+            if status == "dispatched" and not kid and not notes:
+                status = "planned"
+            result.append({
+                "id": str(r[0]), "t": ct, "a": aud,
+                "tp": s.get("topic_angle", "")[:100],
+                "s": status,
+                "n": notes[:100],
+                "rv": float(r[3] or s.get("revenue_estimate", 0) or 0),
+                "kid": kid,
+            })
         else:
             result.append({
-                "id": "", "t": s.get("content_type", ""), "a": s.get("audience", ""),
+                "id": "", "t": ct, "a": aud,
                 "tp": s.get("topic_angle", "")[:100], "s": "planned",
-                "n": "", "rv": float(s.get("revenue_estimate", 0) or 0), "kid": ""
+                "n": "", "rv": float(s.get("revenue_estimate", 0) or 0), "kid": "",
             })
-
-    # Any exec slots dispatched outside the plan (extra campaigns run ad-hoc)
-    for k, ex in exec_by_key.items():
-        if k not in seen:
-            result.append(ex)
 
     return result
 
@@ -391,9 +393,9 @@ def pull_klaviyo_audience_health() -> list:
     campaigns_info: dict[str, dict] = {}
     url: str | None = "https://a.klaviyo.com/api/campaigns/"
     params: dict = {
-        "filter": "equals(messages.channel,'email'),equals(status,'sent')",
+        "filter": "equals(messages.channel,'email'),equals(status,'Sent')",
         "fields[campaign]": "name,send_time,audiences",
-        "sort": "-send_time",
+        "sort": "-created_at",
         "page[size]": "50",
     }
     page = 0
@@ -429,30 +431,40 @@ def pull_klaviyo_audience_health() -> list:
     if not campaigns_info:
         return []
 
-    # Step 2: Fetch metrics for all campaigns in one report
+    # Step 2: Fetch metrics for all campaigns in one report.
+    # group_by campaign_message_id is required by the API; aggregate to campaign level in Python.
     metrics_by_campaign: dict[str, dict] = {}
     try:
         resp = _httpx.post(
             "https://a.klaviyo.com/api/campaign-values-reports/",
             headers=headers,
             json={"data": {"type": "campaign-values-report", "attributes": {
-                "statistics": ["recipients", "conversion_value", "revenue_per_recipient"],
+                "statistics": ["recipients", "conversion_value"],
                 "timeframe": {"key": "last_365_days"},
                 "conversion_metric_id": "X93gjq",
-                "group_by": ["campaign_id"],
+                "group_by": ["campaign_id", "campaign_message_id"],
             }}},
-            timeout=45,
+            timeout=60,
         )
         if resp.is_success:
+            # Aggregate per-message rows up to campaign level
+            agg: dict[str, dict] = {}
             for r in resp.json().get("data", {}).get("attributes", {}).get("results", []):
                 cid = r.get("groupings", {}).get("campaign_id", "")
-                if cid and cid in campaigns_info:
-                    s = r.get("statistics", {})
-                    metrics_by_campaign[cid] = {
-                        "recipients": int(float(s.get("recipients", 0) or 0)),
-                        "revenue": float(s.get("conversion_value", 0) or 0),
-                        "rpr": float(s.get("revenue_per_recipient", 0) or 0),
-                    }
+                if not cid or cid not in campaigns_info:
+                    continue
+                s = r.get("statistics", {})
+                if cid not in agg:
+                    agg[cid] = {"recipients": 0.0, "revenue": 0.0}
+                agg[cid]["recipients"] += float(s.get("recipients", 0) or 0)
+                agg[cid]["revenue"] += float(s.get("conversion_value", 0) or 0)
+            for cid, a in agg.items():
+                rpr = a["revenue"] / a["recipients"] if a["recipients"] > 0 else 0.0
+                metrics_by_campaign[cid] = {
+                    "recipients": int(a["recipients"]),
+                    "revenue": round(a["revenue"], 2),
+                    "rpr": round(rpr, 4),
+                }
     except Exception:
         pass
 

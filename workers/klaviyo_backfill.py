@@ -91,9 +91,9 @@ def _get_campaigns_for_month(api_key: str, year: int, month: int) -> list[dict]:
     campaigns: list[dict] = []
     url = f"{KLAVIYO_BASE}/campaigns/"
     params = {
-        "filter": f"equals(messages.channel,'email'),equals(status,'sent')",
+        "filter": "equals(messages.channel,'email'),equals(status,'Sent')",
         "fields[campaign]": "name,status,send_time,audiences",
-        "sort": "-send_time",
+        "sort": "-created_at",
         "page[size]": "50",
     }
     while url:
@@ -112,10 +112,7 @@ def _get_campaigns_for_month(api_key: str, year: int, month: int) -> list[dict]:
                 continue
             if since <= dt <= until:
                 campaigns.append(item)
-            elif dt < since:
-                # Items are sorted by send_time desc — once we fall below the window, stop
-                return campaigns
-        # Paginate
+        # Paginate through all pages (can't stop early since sort is -created_at, not -send_time)
         next_link = body.get("links", {}).get("next")
         url    = next_link if next_link else None
         params = {}  # next link already includes params
@@ -130,10 +127,11 @@ def _get_campaign_performance(api_key: str, campaign_id: str) -> dict | None:
         "data": {
             "type": "campaign-values-report",
             "attributes": {
-                "statistics": ["recipients", "open_rate", "conversion_value", "revenue_per_recipient"],
+                "statistics": ["recipients", "open_rate", "conversion_value"],
                 "timeframe": {"key": "last_365_days"},
                 "conversion_metric_id": CONVERSION_METRIC_ID,
                 "filter": f'equals(campaign_id,"{campaign_id}")',
+                "group_by": ["campaign_id", "campaign_message_id"],
             },
         }
     }
@@ -149,7 +147,7 @@ def _get_campaign_performance(api_key: str, campaign_id: str) -> dict | None:
     if not results:
         return None
 
-    # Aggregate across send channels
+    # Aggregate across messages
     total_recip   = 0.0
     total_revenue = 0.0
     or_sum        = 0.0
