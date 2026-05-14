@@ -506,7 +506,7 @@ HANDLERS = {
     "approve_day":       _handle_approve_day,
     "deploy_today":      lambda conn, _: (_handle_deploy_today(), None)[0],
     "revenue_query":     lambda conn, _: _handle_revenue_query(conn),
-    "generate_calendar": lambda conn, _: _handle_generate_calendar(),
+    "generate_calendar": lambda conn, _: "Calendar generation disabled in Slack. Ask in Claude conversation instead. Type calendar to see current page.",
     "restore_calendar":  _handle_restore_calendar,
     "run_weekly_brief":  lambda conn, _: _handle_weekly_brief(),
     "deploy_episode":    lambda conn, _: _handle_deploy_episode(conn),
