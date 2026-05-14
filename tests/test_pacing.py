@@ -95,8 +95,9 @@ def test_required_daily_rate_math(conn):
     try:
         from pacing.brain import compute_pacing_state
         state = compute_pacing_state(gid)
-        # Remaining = 75000, days remaining = days_left
-        expected = Decimal("75000") / Decimal(max(state.days_remaining, 1))
+        # Formula: required_daily_rate = max(0, target - ptd) / max(days_remaining, 1)
+        # Use actual ptd (not assumed $75K) so production data doesn't break the assertion.
+        expected = max(Decimal(0), Decimal("150000") - state.period_to_date_value) / Decimal(max(state.days_remaining, 1))
         assert abs(state.required_daily_rate - expected) < Decimal("1")
     finally:
         _cleanup_goal(conn, gid)
@@ -111,7 +112,13 @@ def test_dedup_same_order_id_takes_latest(conn):
     oid = str(uuid.uuid4())
     today_str = date.today().isoformat() + "T00:00:00+00:00"
 
-    # Insert two rows: old value $200, new value $150 (refund scenario)
+    from pacing.brain import compute_pacing_state
+
+    # Baseline: ptd before inserting our test order (may include production data)
+    baseline = compute_pacing_state(gid)
+    baseline_ptd = baseline.period_to_date_value
+
+    # Insert two rows for same order_id: old $200 then new $150 (refund scenario)
     conn.execute(
         "INSERT INTO performance (id, source, metric_name, metric_value, dimensions, measured_at) "
         "VALUES (%s, 'shopify', 'order_revenue', 200, %s::jsonb, NOW() - INTERVAL '1 hour')",
@@ -125,10 +132,9 @@ def test_dedup_same_order_id_takes_latest(conn):
     conn.commit()
 
     try:
-        from pacing.brain import compute_pacing_state
         state = compute_pacing_state(gid)
-        # Should use $150 (latest), not $200 (old)
-        assert state.period_to_date_value == Decimal("150.00")
+        # Dedup picks $150 (latest), NOT $200 (old) or $350 (both). Verify relative change.
+        assert abs(state.period_to_date_value - (baseline_ptd + Decimal("150"))) < Decimal("1")
     finally:
         _cleanup_goal(conn, gid)
         conn.execute("DELETE FROM performance WHERE dimensions->>'order_id'=%s", (oid,))
@@ -163,11 +169,18 @@ def test_orders_outside_period_excluded(conn):
     gid = _seed_goal(conn, target=150000)
     oid = str(uuid.uuid4())
     last_month = date.today().replace(day=1) - timedelta(days=1)
+
+    from pacing.brain import compute_pacing_state
+
+    # Baseline before adding the out-of-period order (production data may already be present)
+    baseline = compute_pacing_state(gid)
+    baseline_ptd = baseline.period_to_date_value
+
     _seed_order(conn, oid, 50000, last_month)
     try:
-        from pacing.brain import compute_pacing_state
         state = compute_pacing_state(gid)
-        assert state.period_to_date_value == Decimal("0.00")
+        # Last-month order must not shift ptd at all
+        assert state.period_to_date_value == baseline_ptd
     finally:
         _cleanup_goal(conn, gid)
         _cleanup_perf(conn, oid)

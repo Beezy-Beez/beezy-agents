@@ -321,6 +321,24 @@ def _handle_modify_calendar(conn, params: dict) -> str:
 
     diff = json.loads(raw[s:e+1])
 
+    # Ensure all added slots have a non-zero revenue_estimate (compute before saving to DB)
+    FALLBACK_RPR = {
+        "active_seal": 1.268, "whales": 0.658, "lapsed_30d": 0.267, "vip": 0.161,
+        "engaged_customers": 0.101, "one_time_buyers": 0.056, "engaged_prospects": 0.064,
+        "super_engaged": 0.120,
+    }
+    FALLBACK_LIST = {
+        "active_seal": 511, "whales": 1038, "lapsed_30d": 3618, "vip": 5424,
+        "engaged_customers": 13340, "one_time_buyers": 12951, "engaged_prospects": 12002,
+        "super_engaged": 4447,
+    }
+    for slot in diff.get("slots_to_add", []):
+        if not slot.get("revenue_estimate"):
+            aud = slot.get("audience", "")
+            rpr = FALLBACK_RPR.get(aud, 0.10)
+            lst = FALLBACK_LIST.get(aud, 1000)
+            slot["revenue_estimate"] = round(rpr * lst, 2)
+
     # Apply diff to existing slots (never replace the whole calendar)
     to_remove = {
         (r.get("date"), r.get("content_type"))
@@ -341,33 +359,13 @@ def _handle_modify_calendar(conn, params: dict) -> str:
 
     # Republish Shopify calendar page
     try:
-        from pacing.calendar import run_monthly
+        from pacing.calendar import _generate_html_report, _publish_calendar_page
         from datetime import date as _date
         month_start = _date(date.today().year, date.today().month, 1)
-        # Use internal republish path
-        from pacing.calendar import _generate_html_report, _publish_calendar_page
         html = _generate_html_report(month_start, calendar)
         page_url = _publish_calendar_page(month_start, html)
     except Exception as ex:
         page_url = "(page update failed: " + str(ex) + ")"
-
-    # P10-B: Ensure all added slots have revenue_estimate computed from live RPR × list size
-    FALLBACK_RPR = {
-        "active_seal": 1.268, "whales": 0.658, "lapsed_30d": 0.267, "vip": 0.161,
-        "engaged_customers": 0.101, "one_time_buyers": 0.056, "engaged_prospects": 0.064,
-        "super_engaged": 0.120,
-    }
-    FALLBACK_LIST = {
-        "active_seal": 511, "whales": 1038, "lapsed_30d": 3618, "vip": 5424,
-        "engaged_customers": 13340, "one_time_buyers": 12951, "engaged_prospects": 12002,
-        "super_engaged": 4447,
-    }
-    for slot in diff.get("slots_to_add", []):
-        if not slot.get("revenue_estimate"):
-            aud = slot.get("audience", "")
-            rpr = FALLBACK_RPR.get(aud, 0.10)
-            lst = FALLBACK_LIST.get(aud, 1000)
-            slot["revenue_estimate"] = round(rpr * lst, 2)
 
     added   = len(diff.get("slots_to_add", []))
     removed = len(diff.get("slots_to_remove_by_date_and_type", []))
