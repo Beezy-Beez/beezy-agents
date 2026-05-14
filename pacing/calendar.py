@@ -216,7 +216,7 @@ def _build_context(month_start: date) -> str:
     ctx = {
         "brand": "Beezy Beez Honey — DTC botanical extract honey, women 50+, sleep support, ~$54.95 AOV",
         "planning_month": str(month_start)[:7],
-        "planning_period_first_day": str(month_start),
+        "planning_period_first_day": str(max(month_start, date.today())),
         "planning_period_last_day": str(month_end - __import__("datetime").timedelta(days=1)),
         "days_in_month": days_in_month,
         "IMPORTANT": "Generate slots covering ALL days from planning_period_first_day through planning_period_last_day inclusive. Do not stop before the last day.",

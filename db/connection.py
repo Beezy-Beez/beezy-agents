@@ -15,7 +15,7 @@ def get_pool() -> ConnectionPool:
     if _pool is None:
         if not config.DATABASE_URL:
             raise RuntimeError("DATABASE_URL is not set. Add it to .env.")
-        _pool = ConnectionPool(conninfo=config.DATABASE_URL, min_size=1, max_size=8, open=True)
+        _pool = ConnectionPool(conninfo=config.DATABASE_URL, min_size=1, max_size=8, open=True, max_idle=60, max_lifetime=300, reconnect_timeout=5, kwargs={"keepalives": 1, "keepalives_idle": 10, "keepalives_interval": 5, "keepalives_count": 3})
     return _pool
 
 

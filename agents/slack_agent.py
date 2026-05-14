@@ -76,11 +76,14 @@ def _get_messages_since(channel: str, oldest_ts: str) -> list[dict]:
 
 _LAST_READ: dict[str, str] = {}
 
+
 def _get_last_read_ts(conn, channel: str) -> str:
-    return _LAST_READ.get(channel, str(time.time() - 300))
+    return _LAST_READ.get(channel, str(time.time() - 300))  # default: last 5 min
+
 
 def _save_last_read_ts(conn, channel: str, ts: str) -> None:
     _LAST_READ[channel] = ts
+
 
 # ── Command interpreter ───────────────────────────────────────────────────────
 
@@ -382,12 +385,40 @@ def _handle_query_calendar(conn, params: dict) -> str:
     return msg.content[0].text.strip()
 
 
+def _handle_restore_calendar(conn, params: dict) -> str:
+    month = date.today().strftime("%Y-%m")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT output FROM decisions WHERE decision_type='calendar_backup' "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+        backup = cur.fetchone()
+    if not backup:
+        return "No calendar backup found."
+    backup_data = backup[0] if isinstance(backup[0], dict) else json.loads(backup[0])
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM decisions WHERE decision_type='calendar_plan' "
+            "AND output->>'month'=%s ORDER BY created_at DESC LIMIT 1",
+            (month,)
+        )
+        row = cur.fetchone()
+    if not row:
+        return "No current calendar for " + month
+    with conn.cursor() as cur:
+        cur.execute("UPDATE decisions SET output=%s::jsonb WHERE id=%s",
+                    (json.dumps(backup_data), row[0]))
+    conn.commit()
+    return "Calendar restored from backup. " + str(len(backup_data.get("slots",[]))) + " slots."
+
+
 HANDLERS = {
     "approve_calendar":  lambda conn, _: _handle_approve_calendar(conn),
     "approve_week":      lambda conn, _: _handle_approve_week(conn),
     "deploy_today":      lambda conn, _: (_handle_deploy_today(), None)[0],
     "revenue_query":     lambda conn, _: _handle_revenue_query(conn),
     "generate_calendar": lambda conn, _: _handle_generate_calendar(),
+    "restore_calendar":  _handle_restore_calendar,
     "run_weekly_brief":  lambda conn, _: _handle_weekly_brief(),
     "deploy_episode":    lambda conn, _: _handle_deploy_episode(conn),
     "status":            lambda conn, _: _handle_status(conn),
@@ -418,7 +449,6 @@ def _process_beezy_agents(conn) -> None:
         print(f"[slack_agent] Message from {user}: {text[:80]}")
 
         try:
-            # Fast keyword matching — no API call needed for known commands
             text_lower = text.strip().lower()
             fast_match = {
                 "help": {"action": "help"},
@@ -431,7 +461,6 @@ def _process_beezy_agents(conn) -> None:
                 "deploy latest episode": {"action": "deploy_episode"},
                 "restore calendar": {"action": "restore_calendar"},
             }
-
             result = fast_match.get(text_lower)
             if result:
                 _post_message(BEEZY_AGENTS_CHANNEL, "⏳ On it...")
