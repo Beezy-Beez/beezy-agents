@@ -6,5 +6,8 @@
     "build": "echo 'Python project — no Node.js build'",
     "typecheck": "echo 'Python project — no typecheck'"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "prettier": "^3.8.1",
+    "typescript": "~5.9.2"
+  }
 }

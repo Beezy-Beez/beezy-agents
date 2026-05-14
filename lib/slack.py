@@ -11,11 +11,12 @@ from typing import Any, Optional
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 _SECTION_CHAR_LIMIT = 2800  # Slack section blocks cap at 3000; leave headroom.
+_webhook_down = False  # suppress repeated DNS-failure spam
 
 
 def _post(payload: dict[str, Any]) -> bool:
+    global _webhook_down
     if not SLACK_WEBHOOK_URL:
-        print("[slack] SLACK_WEBHOOK_URL not set, skipping post")
         return False
     try:
         req = urllib.request.Request(
@@ -28,7 +29,17 @@ def _post(payload: dict[str, Any]) -> bool:
             ok = 200 <= resp.status < 300
             if not ok:
                 print(f"[slack] non-2xx status: {resp.status}")
+            elif _webhook_down:
+                print("[slack] Webhook connection restored.")
+                _webhook_down = False
             return ok
+    except OSError as e:
+        # OSError covers socket.gaierror ([Errno -2]) and connection refused.
+        # Log once; stay silent on every subsequent failure until it recovers.
+        if not _webhook_down:
+            print(f"[slack] Webhook unreachable: {e}. Suppressing further errors.")
+            _webhook_down = True
+        return False
     except Exception as e:
         print(f"[slack] post failed: {e}")
         return False
