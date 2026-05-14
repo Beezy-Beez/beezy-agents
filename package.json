@@ -1,0 +1,10 @@
+{
+  "name": "beezy-workspace",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "echo 'Python project — no Node.js build'",
+    "typecheck": "echo 'Python project — no typecheck'"
+  },
+  "devDependencies": {}
+}
