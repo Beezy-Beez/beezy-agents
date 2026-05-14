@@ -52,23 +52,38 @@ def _pacing() -> dict:
     cc = 0
     as_of = None
     stale = False
-    try:
+
+    def _load_cache():
+        nonlocal cr, fr, cc, as_of, stale
         row = _q1("SELECT value FROM agent_state WHERE key='pacing_cache'")
-        if row:
-            d = json.loads(row[0])
-            cr = float(d.get("campaign_rev", 0))
-            fr = float(d.get("flow_rev", 0))
-            cc = int(d.get("campaign_count", 0))
-            as_of = d.get("as_of")
-            if as_of:
-                try:
-                    cache_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
-                    if (datetime.now(NY) - cache_dt).total_seconds() > 8 * 3600:
-                        stale = True
-                except Exception:
-                    pass
+        if not row:
+            return False
+        d = json.loads(row[0])
+        cr = float(d.get("campaign_rev", 0))
+        fr = float(d.get("flow_rev", 0))
+        cc = int(d.get("campaign_count", 0))
+        as_of = d.get("as_of")
+        if as_of:
+            try:
+                cache_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+                if (datetime.now(NY) - cache_dt).total_seconds() > 8 * 3600:
+                    stale = True
+            except Exception:
+                pass
+        return True
+
+    try:
+        if not _load_cache():
+            # Cache missing — pull live from Klaviyo and store it now
+            try:
+                from workers.pacing_cache import refresh_pacing_cache
+                refresh_pacing_cache()
+                _load_cache()
+            except Exception as e:
+                print(f"[dashboard] inline pacing refresh failed: {e}")
     except Exception:
         pass
+
     rev = cr + fr
     pct = rev / MONTHLY_GOAL * 100 if MONTHLY_GOAL else 0
     daily_rate_actual = rev / days_elapsed if days_elapsed else 0
