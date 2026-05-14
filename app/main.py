@@ -230,8 +230,10 @@ def debug_pacing():
 app.include_router(dashboard_router)
 
 
-async def healthz():
-    return {"status": "ok", "agents": "running"}
+@app.get("/")
+async def root():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/dashboard", status_code=302)
 
 
 @app.post("/api/approve-week")
