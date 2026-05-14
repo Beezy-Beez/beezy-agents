@@ -191,7 +191,7 @@ def _upcoming_slots() -> list:
     month_end = date(today.year, today.month, last_day)
     month = today.strftime("%Y-%m")
 
-    # Load the calendar plan — used for topic/time/estimate lookup and future slots
+    # Load the calendar plan
     drow = _q1(
         "SELECT output FROM decisions WHERE decision_type='calendar_plan' AND output->>'month'=%s "
         "ORDER BY created_at DESC LIMIT 1",
@@ -205,76 +205,89 @@ def _upcoming_slots() -> list:
         except Exception:
             pass
 
-    # Build plan lookup for topic/time/estimate cross-ref (keyed by content_type+audience)
-    plan_by_key: dict = {}
+    # Build plan lookups keyed by (date, content_type, audience) and (content_type, audience)
+    plan_by_date_key: dict = {}
+    plan_by_type_key: dict = {}
     for s in plan_slots:
-        k = (s.get("content_type", ""), s.get("audience", ""))
-        if k not in plan_by_key:
-            plan_by_key[k] = {
-                "tp": s.get("topic_angle", "")[:60],
-                "tm": s.get("send_time_est", ""),
-                "rv": float(s.get("revenue_estimate", 0) or 0),
-            }
+        dk = (s.get("date", ""), s.get("content_type", ""), s.get("audience", ""))
+        tk = (s.get("content_type", ""), s.get("audience", ""))
+        entry = {
+            "tp": s.get("topic_angle", "")[:60],
+            "tm": s.get("send_time_est", ""),
+            "rv": float(s.get("revenue_estimate", 0) or 0),
+        }
+        plan_by_date_key[dk] = entry
+        if tk not in plan_by_type_key:
+            plan_by_type_key[tk] = entry
 
-    result: list = []
-
-    # TODAY: truth is calendar_executions (what actually ran), deduped by content_type+audience
-    today_rows = _q(
-        """SELECT DISTINCT ON (content_type, audience)
-               id, content_type, audience, status, klaviyo_campaign_id, actual_revenue
-           FROM calendar_executions
-           WHERE slot_date = %s
-           ORDER BY content_type, audience, id ASC""",
-        (today,)
-    )
-    for r in today_rows:
-        k = (r[1], r[2])
-        plan = plan_by_key.get(k, {})
-        result.append({
-            "date": today_iso,
-            "t": r[1],
-            "a": r[2],
-            "tp": plan.get("tp", ""),
-            "tm": plan.get("tm", ""),
-            "rv": plan.get("rv", 0),
-            "actual_rev": float(r[5] or 0),
-            "status": r[3],
-            "exec_id": str(r[0]),
-            "kid": r[4] or "",
-        })
-
-    # FUTURE: planned slots from decisions table, overlaid with any already-dispatched rows
-    future_slots = [s for s in plan_slots if today_iso < s.get("date", "") <= month_end.isoformat()]
-    future_slots.sort(key=lambda x: (x.get("date", ""), x.get("send_time_est", "")))
-
+    # Fetch ALL executions from earliest plan date through month_end (deduped per day)
+    plan_start = min((s.get("date", today_iso) for s in plan_slots), default=today_iso)
     exec_rows = _q(
-        "SELECT DISTINCT ON (slot_date, content_type, audience) "
-        "id, slot_date, content_type, audience, status, klaviyo_campaign_id, actual_revenue "
-        "FROM calendar_executions WHERE slot_date > %s AND slot_date <= %s "
-        "ORDER BY slot_date, content_type, audience, id ASC",
-        (today, month_end)
+        """SELECT DISTINCT ON (slot_date, content_type, audience)
+               id, slot_date, content_type, audience, status, klaviyo_campaign_id, actual_revenue
+           FROM calendar_executions
+           WHERE slot_date BETWEEN %s AND %s
+           ORDER BY slot_date, content_type, audience, id ASC""",
+        (plan_start, month_end)
     )
-    exec_map: dict = {}
+    exec_by_key: dict = {}
     for r in exec_rows:
         k = (str(r[1]), r[2], r[3])
-        exec_map[k] = {"id": str(r[0]), "status": r[4], "kid": r[5] or "", "actual_rev": float(r[6] or 0)}
+        exec_by_key[k] = {"id": str(r[0]), "status": r[4], "kid": r[5] or "", "actual_rev": float(r[6] or 0)}
 
-    for s in future_slots:
-        k = (s.get("date", ""), s.get("content_type", ""), s.get("audience", ""))
-        ex = exec_map.get(k, {})
+    result: list = []
+    seen_keys: set = set()
+
+    # ALL plan slots (past + today + future) — overlay with exec data
+    for s in plan_slots:
+        d = s.get("date", "")
+        dk = (d, s.get("content_type", ""), s.get("audience", ""))
+        seen_keys.add(dk)
+        ex = exec_by_key.get(dk, {})
+
+        # Today: skip planned slots that never ran
+        if d == today_iso and not ex:
+            continue
+
+        # Past: show plan slot; if exec ran, overlay status + actual_rev
+        # Future: show plan slot; overlay if pre-dispatched
+        if d < today_iso and not ex:
+            status = "not_sent"
+        else:
+            status = ex.get("status", "planned")
+
         result.append({
-            "date": s.get("date", ""),
+            "date": d,
             "t": s.get("content_type", ""),
             "a": s.get("audience", ""),
             "tp": s.get("topic_angle", "")[:60],
             "tm": s.get("send_time_est", ""),
             "rv": float(s.get("revenue_estimate", 0) or 0),
             "actual_rev": ex.get("actual_rev", 0),
-            "status": ex.get("status", "planned"),
+            "status": status,
             "exec_id": ex.get("id", ""),
             "kid": ex.get("kid", ""),
         })
 
+    # Extra executions not in the current plan (e.g., slots dispatched under a prior plan version)
+    for r in exec_rows:
+        k = (str(r[1]), r[2], r[3])
+        if k not in seen_keys:
+            plan = plan_by_date_key.get(k) or plan_by_type_key.get((r[2], r[3]), {})
+            result.append({
+                "date": str(r[1]),
+                "t": r[2],
+                "a": r[3],
+                "tp": plan.get("tp", ""),
+                "tm": plan.get("tm", ""),
+                "rv": plan.get("rv", 0),
+                "actual_rev": float(r[6] or 0),
+                "status": r[4],
+                "exec_id": str(r[0]),
+                "kid": r[5] or "",
+            })
+
+    result.sort(key=lambda x: (x.get("date", ""), x.get("tm", ""), x.get("t", "")))
     return result
 
 
@@ -462,14 +475,15 @@ _CT_LABEL = {
 }
 
 _STATUS_COLORS = {
-    "dispatched": ("#1a73e8", "Scheduled"),
+    "dispatched": ("#1a73e8", "Sent"),
     "completed": ("#1e7e34", "Sent"),
     "failed": ("#c0392b", "Failed"),
     "blocked": ("#e07b00", "Blocked"),
     "planned": ("#888", "Planned"),
     "pending": ("#888", "Pending"),
     "cancelled": ("#555", "Cancelled"),
-    "skipped": ("#888", "Skipped"),
+    "skipped": ("#aaa", "Skipped"),
+    "not_sent": ("#ddd", "—"),
 }
 
 
@@ -485,6 +499,25 @@ def _ct_chip(ct: str) -> str:
 
 
 def _html_command_center(p: dict) -> str:
+    # Show load state when no cache data exists yet
+    if p["rev"] == 0 and not p.get("as_of"):
+        return f"""
+    <div class="card command-center">
+      <div class="cc-stats" style="flex:1;text-align:center;padding:32px 20px">
+        <div class="hero-num" style="color:#ccc;font-size:28px">Revenue not loaded</div>
+        <div style="color:#aaa;font-size:13px;margin-top:8px">
+          Cache refreshes automatically at 7:35am ET daily.<br>Click to pull from Klaviyo now.
+        </div>
+        <button class="btn-approve" style="margin-top:20px;max-width:280px"
+                onclick="apiPost('/api/refresh-pacing','Revenue loaded!')">
+          Load Revenue Data
+        </button>
+        <div style="color:#bbb;font-size:11px;margin-top:10px">
+          Goal: ${p["goal"]:,}/month · {p["days_left"]}d remaining
+        </div>
+      </div>
+    </div>"""
+
     circ = 2 * 3.14159 * 70
     fp = min(p["pct"] / 100, 1.0)
     filled = circ * fp
@@ -503,9 +536,9 @@ def _html_command_center(p: dict) -> str:
     if p.get("as_of"):
         as_of_str = f" · as of {p['as_of'][:16]}"
         if p.get("stale"):
-            as_of_str += " ⚠ stale"
+            as_of_str += " ⚠ stale — <a href='#' onclick=\"apiPost('/api/refresh-pacing','Revenue refreshed!');return false\">refresh</a>"
     else:
-        as_of_str = " · cache not yet populated (refreshes 7:35am daily)"
+        as_of_str = ""
     forecast_str = f"${p['forecast']:,.0f}"
     forecast_note = "projected month-end at current pace"
     if p["forecast"] >= MONTHLY_GOAL:
@@ -678,12 +711,15 @@ def _html_calendar(slots: list) -> str:
             except Exception:
                 d_label = d
         is_today = d == today_iso
-        row_class = "cal-row today-row" if is_today else "cal-row"
+        is_past = d < today_iso
+        row_class = "cal-row today-row" if is_today else ("cal-row past-row" if is_past else "cal-row")
         retry_btn = ""
         if s["exec_id"] and s["status"] in ("failed", "blocked"):
             eid = s["exec_id"]
             retry_btn = f'<button class="btn-retry-sm" onclick="apiPost(\'/api/retry-slot?id={eid}\',\'Queued.\')">↺</button>'
         ct_color = _CT_COLORS.get(s["t"], "#555")
+        if s["status"] == "not_sent":
+            ct_color = "#ccc"
         est_str = f'${s["rv"]:,.0f}' if s["rv"] else "—"
         actual_rev = s.get("actual_rev", 0)
         if actual_rev > 0:
@@ -692,7 +728,7 @@ def _html_calendar(slots: list) -> str:
             diff_str = f'<span style="color:{diff_color};font-size:11px">({pct_diff:+.0f}%)</span>'
             actual_str = f'${actual_rev:,.0f} {diff_str}'
         elif s["status"] in ("dispatched", "completed") and d <= today_iso:
-            actual_str = '<span style="color:#aaa;font-size:11px">pending</span>'
+            actual_str = '<span style="color:#aaa;font-size:11px">pending backfill</span>'
         else:
             actual_str = "—"
         rows_html += f"""
@@ -955,6 +991,7 @@ tr:last-child td{border-bottom:none}
 .cal-row{transition:background 0.1s}
 .cal-row:hover{background:#fdf8f2}
 .today-row{background:#fffef8}
+.past-row{opacity:0.75}
 .today-tag{display:inline-block;margin-left:6px;padding:1px 6px;background:#d4a847;color:#fff;border-radius:3px;font-size:10px;font-weight:700}
 .cal-date{white-space:nowrap}
 .cal-topic{max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

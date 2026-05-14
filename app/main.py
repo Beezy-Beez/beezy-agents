@@ -302,6 +302,23 @@ async def approve_month():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.post("/api/refresh-pacing")
+async def refresh_pacing():
+    """Manually trigger pacing cache refresh — pulls live MTD revenue from Klaviyo."""
+    try:
+        loop = asyncio.get_event_loop()
+        from workers.pacing_cache import refresh_pacing_cache
+        await loop.run_in_executor(None, refresh_pacing_cache)
+        from db.connection import get_conn
+        import json as _json
+        with get_conn() as c:
+            row = c.execute("SELECT value FROM agent_state WHERE key='pacing_cache'").fetchone()
+            result = _json.loads(row[0]) if row else {}
+        return JSONResponse({"status": "ok", "data": result})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.post("/api/retry-slot")
 async def retry_slot(id: str):
     """Re-queue a failed calendar_executions row by setting status='pending'."""
