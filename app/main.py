@@ -176,8 +176,29 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/healthz")
-async def _setup_routes():
-    pass
+async def healthz():
+    return {"status": "ok"}
+
+
+@app.get("/debug/pacing")
+def debug_pacing():
+    """Diagnose pacing data in the deployed container."""
+    import json, os
+    result = {"database_url_set": bool(os.environ.get("DATABASE_URL") or os.environ.get("DATABASE_URL", "")),
+              "error": None, "raw_value": None, "parsed": None}
+    try:
+        from db.connection import get_conn
+        with get_conn() as c:
+            row = c.execute("SELECT value FROM agent_state WHERE key='pacing_cache'").fetchone()
+            if row:
+                result["raw_value"] = row[0][:200] if isinstance(row[0], str) else str(row[0])[:200]
+                result["parsed"] = json.loads(row[0])
+            else:
+                result["error"] = "no pacing_cache row found"
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
 
 app.include_router(dashboard_router)
 
