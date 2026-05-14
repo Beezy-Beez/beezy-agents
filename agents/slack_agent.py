@@ -477,6 +477,29 @@ def _handle_approve_day(conn, params: dict) -> str:
     )
 
 
+def _handle_view_calendar(conn, params: dict) -> str:
+    """Return the current calendar page URL."""
+    month = date.today().strftime("%Y-%m")
+    url = f"https://trybeezybeez.myshopify.com/pages/calendar-{month}"
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT output->>'total_slots', output->>'campaign_revenue_mtd', "
+            "output->>'flow_revenue_mtd', output->>'total_projected', output->>'gap_to_goal' "
+            "FROM decisions WHERE decision_type='calendar_plan' "
+            "AND output->>'month'=%s ORDER BY created_at DESC LIMIT 1",
+            (month,)
+        )
+        row = cur.fetchone()
+    if row:
+        return (
+            f"Calendar {month}\n"
+            f"{row[0]} slots | Campaigns MTD: ${float(row[1] or 0):,.2f} | Flows MTD: ${float(row[2] or 0):,.2f}\n"
+            f"Total projected: ${float(row[3] or 0):,.2f} | Gap: ${float(row[4] or 0):,.2f}\n"
+            f"{url}"
+        )
+    return f"Calendar: {url}"
+
+
 HANDLERS = {
     "approve_calendar":  lambda conn, _: _handle_approve_calendar(conn),
     "approve_week":      lambda conn, _: _handle_approve_week(conn),
@@ -489,6 +512,7 @@ HANDLERS = {
     "deploy_episode":    lambda conn, _: _handle_deploy_episode(conn),
     "status":            lambda conn, _: _handle_status(conn),
     "help":              lambda conn, _: HELP_TEXT,
+    "view_calendar":     _handle_view_calendar,
     "modify_calendar":   _handle_modify_calendar,
     "query_calendar":    _handle_query_calendar,
 }
@@ -518,6 +542,7 @@ def _process_beezy_agents(conn) -> None:
             text_lower = text.strip().lower()
             fast_match = {
                 "help": {"action": "help"},
+                "calendar": {"action": "view_calendar"},
                 "status": {"action": "status"},
                 "approved": {"action": "approve_calendar"},
                 "approved week": {"action": "approve_week"},

@@ -815,72 +815,18 @@ def generate(month_start: date) -> dict:
         else:
             print(f"[calendar]   Full month coverage verified through {month_end_d}")
 
-    # Pull REAL revenue data from Klaviyo using metric-aggregates endpoint
-    print("[calendar] Pulling live revenue from Klaviyo...")
-    planned_total = sum(float(s.get("revenue_estimate", 0)) for s in cal.get("slots", []))
-    try:
-        import httpx as _hx
-        _kk = __import__("os").environ.get("KLAVIYO_API_KEY", "")
-        if not _kk:
-            raise ValueError("KLAVIYO_API_KEY not set")
-        _kh = {"Authorization": "Klaviyo-API-Key " + _kk,
-               "revision": "2025-10-15",
-               "Content-Type": "application/vnd.api+json",
-               "Accept": "application/vnd.api+json"}
-        _si = month_start.strftime("%Y-%m-%dT00:00:00")
-        _ei = date.today().strftime("%Y-%m-%dT23:59:59")
-        _payload = {"data": {"type": "metric-aggregate", "attributes": {
-            "metric_id": "X93gjq",
-            "measurements": ["sum_value"],
-            "interval": "month",
-            "filter": ["greater-or-equal(datetime," + _si + ")",
-                       "less-than(datetime," + _ei + ")"],
-            "group_by": ["$attributed_channel"],
-        }}}
-        _resp = _hx.post("https://a.klaviyo.com/api/metric-aggregates/",
-            headers=_kh, timeout=30, json=_payload)
-        print(f"[calendar]   Klaviyo status: {_resp.status_code}")
-        _rj = _resp.json()
-        _total_rev = 0.0
-        for mdata in _rj.get("data", {}).get("attributes", {}).get("data", []):
-            for v in mdata.get("measurements", {}).get("sum_value", []):
-                if isinstance(v, list):
-                    _total_rev += sum(x for x in v if isinstance(x, (int, float)))
-                elif isinstance(v, (int, float)):
-                    _total_rev += v
-        # Split by known ratio from Klaviyo dashboard (campaigns ~53%, flows ~47%)
-        _camp_rev = round(_total_rev * 0.53, 2)
-        _flow_rev = round(_total_rev * 0.47, 2)
-        if _total_rev > 0:
-            print(f"[calendar]   Total Klaviyo: ${_total_rev:,.2f} → Campaigns: ${_camp_rev:,.2f} | Flows: ${_flow_rev:,.2f}")
-        else:
-            print("[calendar]   WARNING: Klaviyo returned $0 — check API key and endpoint")
-        cal["campaign_revenue_mtd"] = _camp_rev
-        cal["flow_revenue_mtd"] = _flow_rev
-        cal["calendar_projected_revenue"] = round(planned_total, 2)
-        cal["total_projected"] = round(_camp_rev + _flow_rev + planned_total, 2)
-        cal["monthly_goal"] = 150000
-        cal["gap_to_goal"] = round(150000 - (_camp_rev + _flow_rev + planned_total), 2)
-    except Exception as ex:
-        import traceback
-        print(f"[calendar]   Revenue pull FAILED: {ex}")
-        traceback.print_exc()
-        cal["campaign_revenue_mtd"] = 0
-        cal["flow_revenue_mtd"] = 0
-        cal["calendar_projected_revenue"] = round(planned_total, 2)
-        cal["total_projected"] = round(planned_total, 2)
-        cal["monthly_goal"] = 150000
-        cal["gap_to_goal"] = round(150000 - planned_total, 2)
-
-        print(f"[calendar]   Campaigns: ${_camp:,.2f} | Flows: ${_flow:,.2f} | Projected: ${planned_total:,.0f}")
-    except Exception as ex:
-        print(f"[calendar]   Revenue pull failed: {ex}")
-        cal["campaign_revenue_mtd"] = 0
-        cal["flow_revenue_mtd"] = 0
-        cal["calendar_projected_revenue"] = round(planned_total, 2)
-        cal["total_projected"] = round(planned_total, 2)
-        cal["monthly_goal"] = 150000
-        cal["gap_to_goal"] = round(150000 - planned_total, 2)
+    # Revenue — Replit cannot reach a.klaviyo.com (DNS blocked)
+    # Revenue is embedded when calendar is built in Claude conversation
+    planned_total = sum(float(s.get('revenue_estimate', 0)) for s in cal.get('slots', []))
+    if 'campaign_revenue_mtd' not in cal:
+        cal['campaign_revenue_mtd'] = 0
+        cal['flow_revenue_mtd'] = 0
+    cal['calendar_projected_revenue'] = round(planned_total, 2)
+    _cr = float(cal.get('campaign_revenue_mtd', 0))
+    _fr = float(cal.get('flow_revenue_mtd', 0))
+    cal['total_projected'] = round(_cr + _fr + planned_total, 2)
+    cal['monthly_goal'] = 150000
+    cal['gap_to_goal'] = round(150000 - (_cr + _fr + planned_total), 2)
 
     print("[calendar] Persisting to decisions table...")
     # Retry DB save in case Neon connection died during Opus call
