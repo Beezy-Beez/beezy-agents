@@ -229,7 +229,7 @@ HELP_TEXT = """*Beezy Agent Commands* — type any of these in #beezy-agents:
 
 *Calendar:*
 `approved` — approve the monthly calendar
-`approved week` — approve the next 7 days
+`approved week` — approve the next 7 days\n`approved today` — approve just today\n`approved may 20` — approve a specific date
 `generate calendar` — regenerate this month's calendar
 `run weekly brief` — post next 7 days to Slack now
 
@@ -412,9 +412,75 @@ def _handle_restore_calendar(conn, params: dict) -> str:
     return "Calendar restored from backup. " + str(len(backup_data.get("slots",[]))) + " slots."
 
 
+def _handle_approve_day(conn, params: dict) -> str:
+    """Approve a single day for campaign dispatch."""
+    from datetime import date as _date, timedelta
+    day_str = params.get("day", "today")
+
+    if day_str == "today":
+        target = _date.today()
+    else:
+        # Try parsing various formats
+        try:
+            target = _date.fromisoformat(day_str)
+        except ValueError:
+            # Try "may 15" format
+            import re
+            m = re.match(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+(\d{1,2})", day_str)
+            if m:
+                months = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+                          "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+                target = _date(_date.today().year, months[m.group(1)[:3]], int(m.group(2)))
+            else:
+                return "Could not parse date: " + day_str + ". Use YYYY-MM-DD or 'may 15' format."
+
+    # Insert approval for just that day (use day as both start and end of a 1-day window)
+    week_start = target  # Using the target day as the "week_start" for a 1-day approval
+    import uuid
+    token = str(uuid.uuid4())[:8]
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO calendar_approvals (week_start, token, approved_at, approved_by) "
+            "VALUES (%s, %s, NOW(), %s) "
+            "ON CONFLICT (week_start) DO UPDATE SET approved_at = NOW(), approved_by = EXCLUDED.approved_by",
+            (target, token, "boris_slack")
+        )
+    conn.commit()
+
+    # Count slots for that day
+    month = target.strftime("%Y-%m")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT output FROM decisions WHERE decision_type='calendar_plan' "
+            "AND output->>'month'=%s ORDER BY created_at DESC LIMIT 1",
+            (month,)
+        )
+        row = cur.fetchone()
+
+    slot_count = 0
+    if row:
+        cal = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        day_slots = [s for s in cal.get("slots", []) if s.get("date") == str(target)]
+        slot_count = len(day_slots)
+        slot_summary = ", ".join(
+            s.get("audience","") + " (" + s.get("content_type","") + ")"
+            for s in day_slots
+        )
+    else:
+        slot_summary = "no calendar found"
+
+    return (
+        "Approved " + str(target) + " (" + target.strftime("%A") + ")\n"
+        + str(slot_count) + " slots: " + slot_summary + "\n"
+        + "Type `deploy campaigns` to create these as Klaviyo drafts now, "
+        + "or they\'ll auto-deploy at 8am ET."
+    )
+
+
 HANDLERS = {
     "approve_calendar":  lambda conn, _: _handle_approve_calendar(conn),
     "approve_week":      lambda conn, _: _handle_approve_week(conn),
+    "approve_day":       _handle_approve_day,
     "deploy_today":      lambda conn, _: (_handle_deploy_today(), None)[0],
     "revenue_query":     lambda conn, _: _handle_revenue_query(conn),
     "generate_calendar": lambda conn, _: _handle_generate_calendar(),
@@ -455,6 +521,7 @@ def _process_beezy_agents(conn) -> None:
                 "status": {"action": "status"},
                 "approved": {"action": "approve_calendar"},
                 "approved week": {"action": "approve_week"},
+                "approved today": {"action": "approve_day", "params": {"day": "today"}},
                 "deploy campaigns": {"action": "deploy_today"},
                 "generate calendar": {"action": "generate_calendar"},
                 "run weekly brief": {"action": "run_weekly_brief"},

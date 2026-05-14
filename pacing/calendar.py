@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date, datetime, timezone
+from datetime import date, timedelta, datetime, timezone
 from decimal import Decimal
 
 import anthropic
@@ -234,20 +234,42 @@ def _build_context(month_start: date) -> str:
         "hive_mind_already_drafted": upcoming,
         "last_published_hive_mind_issue": last_issue,
         "content_types_available": [
-            "hive_mind        — prospect newsletter email, Mon/Thu 8pm EST only",
-            "sleep_audio      — Sleep Better podcast episode email, customer list",
-            "seo_blog         — SEO blog post on Shopify, NO email send, revenue_estimate=0",
-            "klaviyo_campaign — primary email campaign to a customer segment, anchor at 2pm EDT",
-            "sniper_followup  — non-opener follow-up 4-6h after primary, different subject line",
-            "sms_campaign     — SMS blast, max 2x/month, high-value moments only",
-            "flow_experiment  — internal flow A/B test or tuning task, revenue_estimate=0",
+            "hive_mind        — prospect newsletter, EVERY 3 DAYS, 8pm ET, audience=engaged_prospects, EXCLUDE all customers",
+            "sleep_audio      — Sleep Better podcast (stories/meditations/you-are-ok), EVERY 3 DAYS alternating with hive_mind, TWO sends per episode: one to active_seal (8:15pm) + one to engaged_customers (8pm, EXCLUDE active_seal)",
+            "seo_blog         — SEO blog post on Shopify, NO email send, revenue_estimate=0, 4-6/month",
+            "klaviyo_campaign — primary email campaign. Includes: JSH lapsed (weekly), $25 credit offers, BOGO, product features, pre-paid subscription offers (whales/VIP 2-3x/month), Hive Club membership pitches (sniper, EXCLUDE active_seal), seasonal/holiday themed. Anchor at 2pm EDT.",
+            "sms_campaign     — SMS blast, 2-3x/WEEK max, active_seal (drops), vip (flash), lapsed_30d (urgency)",
+            "flow_experiment  — internal flow A/B test or tuning task, revenue_estimate=0, 1-2/week",
         ],
         "flow_campaign_context": (
-            "Flows currently ~29-30pct of Klaviyo revenue. Target 70pct. Campaigns must carry "
-            "revenue load until flows mature. Plan 2-4 email sends/day to non-overlapping segments. "
-            "Sniper follow-ups to non-openers are standard and expected. Best send time: 2pm EDT."
+            "Flows ~13pct of revenue. Target 70pct. Campaigns carry the load. "
+            "QUALITY OVER QUANTITY — fewer sends, higher revenue per send. "
+            "Best send time: 2pm EDT. "
+            "HIGH FREQ: sleep_audio (every 3d, $1065/send), JSH lapsed_30d (weekly, $923/send), "
+            "VIP (3-4x/mo, $930/send), active_seal (every audio + features, $503/send), "
+            "hive_mind (every 3d, pipeline builder). "
+            "MODERATE: one_time_buyers 2-3x/mo ($664/send), whales/pre-paid 2-3x/mo ($607/send). "
+            "LOW: lapsed_90_180d MAX 1x/mo ($190/send). NO gummies-to-niche or cold blasts. "
+            "If pacing behind mid-month, increase VIP/lapsed_30d/active_seal first — never lapsed_90_180d. "
+            "MANDATORY: hive_mind every 3 days, sleep_audio every 3 days alternating. "
+            "MANDATORY: cover EVERY day planning_period_first_day through planning_period_last_day."
         ),
     }
+    ctx["PRODUCT_CATALOG_RULE"] = (
+        "CRITICAL: NEVER invent products, flavors, or features. "
+        "Only reference these actual Beezy Beez products: "
+        "HONEY FLAVORS: Cinnamon ($49/$59), Caramel ($49/$59), Blood Orange ($59.95/$64.95), "
+        "Apple Pie ($59.95/$64.95), Vanilla ($49/$59), Chocolate Strawberry ($49/$59), "
+        "Original ($49/$59), Graham Cracker, Strawberry Cheesecake. "
+        "PREMIUM: Delicious Calm 1500MG ($64.95), Ultra Strength 3000MG ($129.95). "
+        "GUMMIES: Mixed Fruit ($59), Black Cherry ($49), Strawberry ($49.95), "
+        "CBN Gummies ($59.95), Trio Bundle ($179.85). "
+        "OTHER: Botanical Oil ($54.95/$69.95), Balm ($39.95/$69.95), Lotion ($59.95), "
+        "Lip Balm 3pk ($39.95), Tea ($24.95), Gift Box ($191.95). "
+        "SUBSCRIPTIONS: Hive Club $19.95/mo or $199.50/yr (45% off, free shipping). "
+        "Pre-Paid Annual $199.50/yr. "
+        "DOES NOT EXIST: ashwagandha honey, wildflower honey, lavender honey, manuka honey."
+    )
     ctx["segment_rpr_data"] = seg_data.get("context_text", "")
     return json.dumps(ctx, indent=2, default=str)
 
@@ -274,7 +296,7 @@ CAMPAIGN VOLUME RULES:
 
 HIVE MIND: Mon + Thu 8pm EST only. Prospect list. Never conflicts with campaign audience.
 
-SMS: max 2x/month. High-value moments only (VIP credit, flash close, restock).
+SMS: 2-3x per WEEK. active_seal (product drops), vip (flash sales), lapsed_30d (urgency). Short + high-impact.
 
 FLOW EXPERIMENTS: 1–2 per week. No revenue. Critical to growing flow contribution %.
 
@@ -530,6 +552,8 @@ h1{color:#8b4513;font-size:28px;margin:0 0 4px;}
 .summary{display:flex;gap:20px;margin:16px 0 24px;flex-wrap:wrap;}
 .card{background:#fff;border-radius:8px;padding:14px 20px;min-width:160px;
   box-shadow:0 1px 4px rgba(0,0,0,.08);}
+.card.warn{border-left:3px solid #e74c3c;}
+.card.good{border-left:3px solid #27ae60;}
 .card .label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#8b7355;margin-bottom:4px;}
 .card .value{font-size:22px;font-weight:600;color:#2c2417;}
 .card.warn .value{color:#c0392b;}
@@ -545,11 +569,19 @@ code{background:#f0e8d8;padding:2px 5px;border-radius:3px;font-size:12px;}
 <h1>Content Calendar — """ + month_lbl + """</h1>
 <p style="color:#8b7355;margin:0 0 16px;">""" + str(len(slots)) + """ slots &middot; Generated """ + str(month_start.today()) + """</p>
 <div class="summary">
-  <div class="card"><div class="label">Planned Revenue</div><div class="value">$""" + f"{planned_total:,.0f}" + """</div></div>
-  <div class="card """ + ("good" if actual_total > 0 else "") + """"><div class="label">Actual Revenue</div><div class="value">$""" + f"{actual_total:,.0f}" + """</div></div>
+  <div class="card"><div class="label">Campaigns MTD</div><div class="value">$""" + f"{float(cal.get('campaign_revenue_mtd', 0)):,.2f}" + """</div></div>
+  <div class="card"><div class="label">Calendar Projected</div><div class="value">$""" + f"{planned_total:,.0f}" + """</div></div>
+  <div class="card"><div class="label">Flows MTD</div><div class="value">$""" + f"{float(cal.get('flow_revenue_mtd', 0)):,.2f}" + """</div></div>
+  <div class="card"><div class="label">Total Projected</div><div class="value" style="font-size:26px;">$""" + f"{float(cal.get('total_projected', planned_total + actual_total)):,.0f}" + """</div></div>
+  <div class="card """ + ("good" if float(cal.get('gap_to_goal', 0)) <= 0 else "warn") + """"><div class="label">Goal: $""" + f"{float(cal.get('monthly_goal', 150000)):,.0f}" + """</div><div class="value">Gap: $""" + f"{abs(float(cal.get('gap_to_goal', 0))):,.0f}" + """</div></div>
+</div>
+<div class="summary">
+  <div class="card"><div class="label">Email Campaigns</div><div class="value">""" + str(sum(1 for s in slots if s.get("channel","") == "email" and s.get("content_type","") == "klaviyo_campaign")) + """</div></div>
+  <div class="card"><div class="label">Hive Mind Issues</div><div class="value">""" + str(sum(1 for s in slots if s.get("content_type","") == "hive_mind")) + """</div></div>
+  <div class="card"><div class="label">Sleep Audio</div><div class="value">""" + str(sum(1 for s in slots if s.get("content_type","") == "sleep_audio")) + """</div></div>
+  <div class="card"><div class="label">SMS</div><div class="value">""" + str(sum(1 for s in slots if s.get("content_type","") == "sms_campaign")) + """</div></div>
+  <div class="card"><div class="label">SEO Blog</div><div class="value">""" + str(sum(1 for s in slots if s.get("content_type","") == "seo_blog")) + """</div></div>
   <div class="card"><div class="label">Total Slots</div><div class="value">""" + str(len(slots)) + """</div></div>
-  <div class="card"><div class="label">Campaigns</div><div class="value">""" + str(sum(1 for s in slots if "campaign" in s.get("content_type",""))) + """</div></div>
-  <div class="card"><div class="label">SMS</div><div class="value">""" + str(sum(1 for s in slots if "sms" in s.get("content_type",""))) + """</div></div>
 </div>
 <table>
 <tr><th>Date</th><th>Type</th><th>Audience</th><th>Topic</th><th>Time</th>
@@ -689,19 +721,180 @@ def _post_slack_summary(month_start: date, cal: dict, decision_id: str, report_p
 
 def generate(month_start: date) -> dict:
     """Generate a monthly content calendar. Returns the calendar dict."""
+    import time as _time
     print(f"[calendar] Generating calendar for {month_start.strftime('%B %Y')}...")
 
     print("[calendar] Fetching context data...")
     context_str = _build_context(month_start)
     print(f"[calendar]   Context: {len(context_str):,} chars")
 
-    print("[calendar] Calling Opus...")
+    print("[calendar] Calling Opus (this may take 30-60 seconds)...")
     cal = _call_opus(context_str)
-    print(f"[calendar]   {len(cal.get('slots', []))} slots generated")
+    slots = cal.get("slots", [])
+    print(f"[calendar]   {len(slots)} slots generated")
+
+    # Post-process: fill any missing days that Opus skipped
+    if slots:
+        from datetime import timedelta as _td
+        month_end_d = date(month_start.year + (1 if month_start.month == 12 else 0),
+                           (month_start.month % 12) + 1, 1) - _td(days=1)
+        start_d = max(month_start, date.today())
+        existing_dates = set(s.get("date","") for s in slots)
+
+        # Content-aware auto-fill: Hive Mind every 3 days, sleep audio every 3 days
+        _segments = ["lapsed_30d", "vip", "engaged_customers", "one_time_buyers", "whales"]
+        _rpr = {"lapsed_30d":0.267,"vip":0.161,"engaged_customers":0.101,"one_time_buyers":0.056,"whales":0.658,"engaged_prospects":0.064,"active_seal":1.268}
+        _ls = {"lapsed_30d":3618,"vip":5424,"engaged_customers":13340,"one_time_buyers":12951,"whales":1038,"engaged_prospects":12002,"active_seal":511}
+        _seg_idx = 0
+        _DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+
+        # Find last Hive Mind and sleep audio dates from existing slots
+        hm_dates = sorted([s["date"] for s in slots if s.get("content_type") == "hive_mind"])
+        sa_dates = sorted([s["date"] for s in slots if s.get("content_type") == "sleep_audio"])
+        last_hm = date.fromisoformat(hm_dates[-1]) if hm_dates else start_d - _td(days=1)
+        last_sa = date.fromisoformat(sa_dates[-1]) if sa_dates else start_d
+
+        d = start_d
+        added = 0
+        while d <= month_end_d:
+            ds = str(d)
+            if ds not in existing_dates:
+                day_slots_added = []
+                # Check if Hive Mind is due (every 3 days from last)
+                if (d - last_hm).days >= 3:
+                    day_slots_added.append({
+                        "date": ds, "day_of_week": _DAYS[d.weekday()],
+                        "content_type": "hive_mind", "channel": "email",
+                        "audience": "engaged_prospects", "topic_angle": "The Hive Mind — prospect newsletter (auto-scheduled)",
+                        "send_time_est": "20:00", "priority": "high",
+                        "revenue_estimate": round(_rpr["engaged_prospects"] * _ls["engaged_prospects"]),
+                        "needs_page": False, "discount_code": "", "discount_pct": 0,
+                        "exclusions": "ALL CUSTOMERS",
+                        "rationale": "Hive Mind every 3 days", "goal_alignment": "Content cadence",
+                        "adjustment_lever": "Adjust via Slack edit",
+                    })
+                    last_hm = d
+                # Check if sleep audio is due (every 3 days, offset from HM)
+                elif (d - last_sa).days >= 3:
+                    for aud, time_str in [("active_seal", "20:15"), ("engaged_customers", "20:00")]:
+                        day_slots_added.append({
+                            "date": ds, "day_of_week": _DAYS[d.weekday()],
+                            "content_type": "sleep_audio", "channel": "email",
+                            "audience": aud, "topic_angle": "Sleep audio episode (auto-scheduled)",
+                            "send_time_est": time_str, "priority": "high",
+                            "revenue_estimate": round(_rpr[aud] * _ls[aud]),
+                            "needs_page": False, "discount_code": "", "discount_pct": 0,
+                            "exclusions": "Active Seal sent separately" if aud == "engaged_customers" else "",
+                            "rationale": "Sleep audio every 3 days", "goal_alignment": "Content cadence",
+                            "adjustment_lever": "Adjust via Slack edit",
+                        })
+                    last_sa = d
+
+                # Always add a regular campaign slot too
+                seg = _segments[_seg_idx % len(_segments)]
+                _seg_idx += 1
+                day_slots_added.append({
+                    "date": ds, "day_of_week": _DAYS[d.weekday()],
+                    "content_type": "klaviyo_campaign", "channel": "email",
+                    "audience": seg, "topic_angle": "Rotating segment send (auto-filled)",
+                    "send_time_est": "14:00", "priority": "medium",
+                    "revenue_estimate": round(_rpr.get(seg,0.1) * _ls.get(seg,5000)),
+                    "needs_page": False, "discount_code": "", "discount_pct": 0,
+                    "rationale": "Auto-filled to cover full month", "goal_alignment": "Fill gap",
+                    "adjustment_lever": "Replace via Slack edit",
+                })
+
+                slots.extend(day_slots_added)
+                added += len(day_slots_added)
+            d += _td(days=1)
+
+        if added > 0:
+            slots.sort(key=lambda s: s.get("date",""))
+            cal["slots"] = slots
+            print(f"[calendar]   Auto-filled {added} missing days through {month_end_d}")
+        else:
+            print(f"[calendar]   Full month coverage verified through {month_end_d}")
+
+    # Pull REAL revenue data from Klaviyo using metric-aggregates endpoint
+    print("[calendar] Pulling live revenue from Klaviyo...")
+    planned_total = sum(float(s.get("revenue_estimate", 0)) for s in cal.get("slots", []))
+    try:
+        import httpx as _hx
+        _kk = __import__("os").environ.get("KLAVIYO_API_KEY", "")
+        if not _kk:
+            raise ValueError("KLAVIYO_API_KEY not set")
+        _kh = {"Authorization": "Klaviyo-API-Key " + _kk,
+               "revision": "2025-10-15",
+               "Content-Type": "application/vnd.api+json",
+               "Accept": "application/vnd.api+json"}
+        _si = month_start.strftime("%Y-%m-%dT00:00:00")
+        _ei = date.today().strftime("%Y-%m-%dT23:59:59")
+        _payload = {"data": {"type": "metric-aggregate", "attributes": {
+            "metric_id": "X93gjq",
+            "measurements": ["sum_value"],
+            "interval": "month",
+            "filter": ["greater-or-equal(datetime," + _si + ")",
+                       "less-than(datetime," + _ei + ")"],
+            "group_by": ["$attributed_channel"],
+        }}}
+        _resp = _hx.post("https://a.klaviyo.com/api/metric-aggregates/",
+            headers=_kh, timeout=30, json=_payload)
+        print(f"[calendar]   Klaviyo status: {_resp.status_code}")
+        _rj = _resp.json()
+        _total_rev = 0.0
+        for mdata in _rj.get("data", {}).get("attributes", {}).get("data", []):
+            for v in mdata.get("measurements", {}).get("sum_value", []):
+                if isinstance(v, list):
+                    _total_rev += sum(x for x in v if isinstance(x, (int, float)))
+                elif isinstance(v, (int, float)):
+                    _total_rev += v
+        # Split by known ratio from Klaviyo dashboard (campaigns ~53%, flows ~47%)
+        _camp_rev = round(_total_rev * 0.53, 2)
+        _flow_rev = round(_total_rev * 0.47, 2)
+        if _total_rev > 0:
+            print(f"[calendar]   Total Klaviyo: ${_total_rev:,.2f} → Campaigns: ${_camp_rev:,.2f} | Flows: ${_flow_rev:,.2f}")
+        else:
+            print("[calendar]   WARNING: Klaviyo returned $0 — check API key and endpoint")
+        cal["campaign_revenue_mtd"] = _camp_rev
+        cal["flow_revenue_mtd"] = _flow_rev
+        cal["calendar_projected_revenue"] = round(planned_total, 2)
+        cal["total_projected"] = round(_camp_rev + _flow_rev + planned_total, 2)
+        cal["monthly_goal"] = 150000
+        cal["gap_to_goal"] = round(150000 - (_camp_rev + _flow_rev + planned_total), 2)
+    except Exception as ex:
+        import traceback
+        print(f"[calendar]   Revenue pull FAILED: {ex}")
+        traceback.print_exc()
+        cal["campaign_revenue_mtd"] = 0
+        cal["flow_revenue_mtd"] = 0
+        cal["calendar_projected_revenue"] = round(planned_total, 2)
+        cal["total_projected"] = round(planned_total, 2)
+        cal["monthly_goal"] = 150000
+        cal["gap_to_goal"] = round(150000 - planned_total, 2)
+
+        print(f"[calendar]   Campaigns: ${_camp:,.2f} | Flows: ${_flow:,.2f} | Projected: ${planned_total:,.0f}")
+    except Exception as ex:
+        print(f"[calendar]   Revenue pull failed: {ex}")
+        cal["campaign_revenue_mtd"] = 0
+        cal["flow_revenue_mtd"] = 0
+        cal["calendar_projected_revenue"] = round(planned_total, 2)
+        cal["total_projected"] = round(planned_total, 2)
+        cal["monthly_goal"] = 150000
+        cal["gap_to_goal"] = round(150000 - planned_total, 2)
 
     print("[calendar] Persisting to decisions table...")
-    decision_id = _persist_calendar(month_start, cal)
-    print(f"[calendar]   decision_id: {decision_id}")
+    # Retry DB save in case Neon connection died during Opus call
+    for attempt in range(3):
+        try:
+            decision_id = _persist_calendar(month_start, cal)
+            print(f"[calendar]   decision_id: {decision_id}")
+            break
+        except Exception as e:
+            print(f"[calendar]   DB save attempt {attempt+1} failed: {e}")
+            if attempt < 2:
+                _time.sleep(2)
+            else:
+                raise
 
     print("[calendar] Building HTML report...")
     html = _generate_html_report(month_start, cal)

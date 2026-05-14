@@ -1,0 +1,63 @@
+{
+  "categories": {
+    "product_hero": [
+      "Warm golden honey dripping from a wooden dipper into a jar, soft evening light, botanical herbs scattered around, dark moody background",
+      "Close-up of amber honey jar on a marble nightstand next to a lit candle, warm bedroom tones, shallow depth of field",
+      "Honey jar surrounded by fresh botanicals \u2014 chamomile, lavender buds, cinnamon sticks \u2014 on a rustic wooden surface, morning light",
+      "Three honey jars arranged in a row with different botanical ingredients visible through the glass, clean white background, editorial product photography",
+      "Golden honey being stirred into a warm cup of tea, steam rising, cozy kitchen counter, evening atmosphere"
+    ],
+    "sleep_wellness": [
+      "Peaceful bedroom at dusk, soft linen sheets, moonlight through sheer curtains, warm amber tones, no people",
+      "Cozy reading nook with a knit blanket, cup of warm tea, and a jar of honey on a side table, soft lamp glow",
+      "Serene bathroom scene with a drawn bath, candles, and botanical elements, warm spa-like atmosphere",
+      "A tranquil garden at twilight with fireflies, a hammock, and warm string lights, dreamy atmosphere",
+      "Morning sunrise through a bedroom window, fresh flowers on the nightstand, peaceful and inviting"
+    ],
+    "lifestyle_women_50plus": [
+      "Elegant woman in her 50s enjoying a moment of calm on a sunlit patio with a cup of tea, warm natural tones",
+      "Two women friends laughing together in a cozy kitchen, warm evening lighting, wine and honey on the counter",
+      "Woman practicing gentle yoga in a sunlit room, botanical plants around, peaceful morning energy",
+      "Woman tending a lush herb garden in golden hour light, wide-brimmed hat, relaxed and joyful",
+      "Woman journaling at a desk near a window, soft morning light, cup of tea beside her, contemplative mood",
+      "Woman walking through a lavender field at sunset, flowing linen dress, peaceful",
+      "Woman meditating on a cushion in a minimalist room, soft natural light, calm energy"
+    ],
+    "seasonal_memorial_day": [
+      "Patriotic but subtle \u2014 American flag bunting on a farmhouse porch, jar of honey on a table, warm summer evening",
+      "Backyard gathering scene with string lights, picnic table, honey and beverages, warm Memorial Day weekend vibes"
+    ],
+    "seasonal_summer": [
+      "Iced golden honey drink with fresh fruit, poolside, bright summer day, refreshing",
+      "Beach cottage porch at sunset, honey jar on a weathered table, ocean breeze feeling"
+    ],
+    "bogo_discount": [
+      "Two honey jars side by side with a gift ribbon connecting them, warm background, generous feeling",
+      "Gift box being opened revealing honey jars inside, warm lighting, excitement and surprise"
+    ],
+    "membership_hive_club": [
+      "Exclusive members-only scene \u2014 velvet background, gold-accented honey jar, premium feel, luxury",
+      "Bee-themed club aesthetic \u2014 hexagonal patterns, gold and dark amber tones, elegant and exclusive"
+    ],
+    "sleep_audio_podcast": [
+      "Cozy nighttime scene with headphones resting on a pillow, soft moonlight, warm blanket",
+      "Woman falling asleep with earbuds in, peaceful expression, soft bedroom lighting",
+      "Abstract dreamy landscape \u2014 rolling hills at twilight, stars emerging, calming blue and gold tones",
+      "Fireplace crackling with a cozy blanket scene, cup of honey tea, headphones nearby, winter evening"
+    ],
+    "newsletter_hive_mind": [
+      "Scientific but warm \u2014 brain illustration surrounded by botanical elements and honey, educational feel",
+      "Abstract sleep cycle visualization with warm amber and deep blue tones, modern editorial style",
+      "Stack of vintage science journals with a honey jar and reading glasses, editorial aesthetic"
+    ]
+  },
+  "rules": [
+    "NEVER default to 'woman reading a book' \u2014 rotate through all categories",
+    "Match the image to the campaign type: product shots for product emails, lifestyle for JSH, abstract for newsletter",
+    "Each campaign in a week should use a DIFFERENT visual style",
+    "Use warm amber/gold/brown tones consistent with Beezy Beez brand palette (#8b4513)",
+    "Women depicted should be diverse and age-appropriate (50+), never stock-photo generic",
+    "Avoid: cold blue tones, clinical/medical imagery, sad/lonely scenes, generic stock photography",
+    "Include product (honey jar) in at least 40% of campaign images"
+  ]
+}
