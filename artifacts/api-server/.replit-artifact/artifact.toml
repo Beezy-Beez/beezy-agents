@@ -14,6 +14,9 @@ run = "cd /home/runner/workspace && uvicorn app.main:app --reload --port $PORT"
 
 [services.production]
 
+[services.production.build]
+args = ["bash", "-c", "pip install -r /home/runner/workspace/requirements.txt"]
+
 [services.production.run]
 args = ["bash", "-c", "cd /home/runner/workspace && uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
 

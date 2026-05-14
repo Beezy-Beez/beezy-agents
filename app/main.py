@@ -254,8 +254,7 @@ async def approve_week():
                 (today, token)
             )
             conn.commit()
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/dashboard", status_code=303)
+        return JSONResponse({"status": "approved", "week_start": today.isoformat()})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -268,14 +267,14 @@ async def approve_month():
     try:
         from db.connection import get_conn
         with get_conn() as conn:
-            # Write approvals for all weeks in the month
             month_start = today.replace(day=1)
             import calendar as _cal
             last_day = _cal.monthrange(today.year, today.month)[1]
             month_end = today.replace(day=last_day)
             import hashlib, os
             secret = os.environ.get("BEEZY_ANTHROPIC_API_KEY", "secret")
-            current = month_start - timedelta(days=month_start.weekday())  # Monday on or before month start
+            current = month_start - timedelta(days=month_start.weekday())
+            weeks_approved = 0
             while current <= month_end:
                 token = hashlib.sha256((str(current) + secret).encode()).hexdigest()[:16]
                 conn.execute(
@@ -284,10 +283,10 @@ async def approve_month():
                     "ON CONFLICT (week_start) DO UPDATE SET approved_at=NOW(), approved_by='dashboard'",
                     (current, token)
                 )
+                weeks_approved += 1
                 current += timedelta(days=7)
             conn.commit()
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/dashboard", status_code=303)
+        return JSONResponse({"status": "approved", "weeks_approved": weeks_approved})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -303,8 +302,7 @@ async def retry_slot(id: str):
                 (id,)
             )
             conn.commit()
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/dashboard", status_code=303)
+        return JSONResponse({"status": "queued", "id": id})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

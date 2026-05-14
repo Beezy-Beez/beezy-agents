@@ -472,9 +472,7 @@ def _html_command_center(p: dict) -> str:
         boost_button = f"""
         <div class="boost-bar">
           <span class="boost-label">You're behind pace by ${gap:,.0f}.</span>
-          <form method="POST" action="/api/boost" style="display:inline">
-            <button type="submit" class="btn-boost">Boost Revenue Now</button>
-          </form>
+          <button class="btn-boost" onclick="apiPost('/api/boost','Boost activated! Check Slack for details.')">Boost Revenue Now</button>
         </div>"""
 
     return f"""
@@ -532,8 +530,7 @@ def _html_today(slots: list, next_send: str) -> str:
     for s in slots:
         retry_btn = ""
         if s["s"] in ("failed", "blocked"):
-            retry_btn = f"""<form method="POST" action="/api/retry-slot?id={s["id"]}" style="display:inline">
-              <button type="submit" class="btn-retry">Retry</button></form>"""
+            retry_btn = f'<button class="btn-retry" onclick="apiPost(\'/api/retry-slot?id={s["id"]}\',\'Slot queued for retry.\')">Retry</button>'
         klav_link = ""
         if s["kid"]:
             klav_link = f'<a href="https://www.klaviyo.com/campaign/{s["kid"]}/edit" target="_blank" class="link-sm">Klaviyo ↗</a>'
@@ -588,20 +585,17 @@ def _html_approval(apv: dict) -> str:
             <div class="approval-sub">{apv["upcoming_count"]} slots queued · est. ${apv["total_estimated_rev"]:,.0f} revenue</div>
           </div>
         </div>
-        <form method="POST" action="/api/approve-week">
-          <button type="submit" class="btn-approve">Approve This Week</button>
-        </form>
+        <button class="btn-approve" onclick="apiPost('/api/approve-week','Approved! Campaigns will run automatically each morning.')">Approve This Week</button>
         <div class="approval-note">Or type <code>approved week</code> in #beezy-agents</div>"""
 
     plan_status = "✓ Calendar plan exists for this month" if apv["month_has_plan"] else "⚠ No calendar plan — type <code>generate calendar</code> in Slack"
     month_approve_html = ""
     if apv["month_has_plan"]:
         month_approve_html = """
-        <form method="POST" action="/api/approve-month" style="margin-top:10px">
-          <button type="submit" class="btn-approve" style="background:#555;font-size:12px;padding:8px">
-            Approve All Weeks This Month
-          </button>
-        </form>"""
+        <button class="btn-approve" style="background:#555;font-size:12px;padding:8px;margin-top:10px"
+                onclick="apiPost('/api/approve-month','All weeks approved!')">
+          Approve All Weeks This Month
+        </button>"""
 
     return f"""
     <div class="card">
@@ -637,7 +631,8 @@ def _html_calendar(slots: list) -> str:
         row_class = "cal-row today-row" if is_today else "cal-row"
         retry_btn = ""
         if s["exec_id"] and s["status"] in ("failed", "blocked"):
-            retry_btn = f'<form method="POST" action="/api/retry-slot?id={s["exec_id"]}" style="display:inline"><button type="submit" class="btn-retry-sm">↺</button></form>'
+            eid = s["exec_id"]
+            retry_btn = f'<button class="btn-retry-sm" onclick="apiPost(\'/api/retry-slot?id={eid}\',\'Queued.\')">↺</button>'
         ct_color = _CT_COLORS.get(s["t"], "#555")
         rows_html += f"""
         <tr class="{row_class}" style="border-left:3px solid {ct_color}">
@@ -956,6 +951,14 @@ def dashboard():
   </div>
 </div>
 <div class="footer">Beezy Agents · Validator (17 rules) · Learning Loop · /healthz</div>
+<script>
+function apiPost(url, successMsg) {{
+  fetch(url, {{method: 'POST'}})
+    .then(r => r.json())
+    .then(d => {{ if (d.error) {{ alert('Error: ' + d.error); }} else {{ alert(successMsg); location.reload(); }} }})
+    .catch(e => alert('Request failed: ' + e));
+}}
+</script>
 </body>
 </html>"""
     return HTMLResponse(content=html)
