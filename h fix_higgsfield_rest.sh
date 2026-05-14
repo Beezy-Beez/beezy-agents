@@ -1,0 +1,2 @@
+ A warmly lit, almost painted editorial image in amber, deep brown, and soft gold tones. A woman in her mid-forties sits alone at a small desk in a dim room at night, a single lamp casting a warm circle of light across an open notebook and a paper recorder printing a slow wavy line. Through a window behind her, the faint glow of a Chicago night skyline in the late 1970s. The mood is quiet, watchful, and tender — the feeling of paying close attention to something invisible. No text. No product. Cinematic, intimate, slightly melancholy. 16:9 aspect ratio.
+
