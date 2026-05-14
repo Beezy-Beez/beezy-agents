@@ -211,7 +211,7 @@ async def healthz():
 def debug_pacing():
     """Diagnose pacing data in the deployed container."""
     import json, os
-    result = {"database_url_set": bool(os.environ.get("POSTGRES_URL")),
+    result = {"database_url_set": bool(os.environ.get("DATABASE_URL")),
               "error": None, "raw_value": None, "parsed": None}
     try:
         from db.connection import get_conn
