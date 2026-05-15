@@ -1,5 +1,15 @@
+// API base resolution:
+//  • explicit NEXT_PUBLIC_API_URL  → use it (Vercel / custom host)
+//  • else dev (`npm run dev`)      → local backend on :8080
+//  • else (production export)      → same-origin "" → relative /api/*,
+//    served by the Replit FastAPI server alongside the static dashboard.
+const _ENV = process.env.NEXT_PUBLIC_API_URL;
 const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+  _ENV !== undefined && _ENV !== ""
+    ? _ENV
+    : process.env.NODE_ENV === "development"
+    ? "http://localhost:8080"
+    : "";
 
 export async function apiFetch<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });

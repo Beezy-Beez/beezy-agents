@@ -1347,7 +1347,7 @@ tr:last-child td{border-bottom:none}
 
 # ── Route ─────────────────────────────────────────────────────────────────────
 
-@router.get("/dashboard", response_class=HTMLResponse)
+@router.get("/dashboard-classic", response_class=HTMLResponse)
 def dashboard():
     now = datetime.now(NY)
     p = _pacing()

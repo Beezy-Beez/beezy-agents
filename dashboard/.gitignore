@@ -5,7 +5,8 @@
 
 # next.js
 /.next/
-/out/
+# NOTE: /out/ (static export) IS committed — the Replit FastAPI server
+# serves it at /dashboard and Autoscale does not run `npm run build`.
 
 # production
 /build

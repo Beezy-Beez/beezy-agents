@@ -314,7 +314,22 @@ app.include_router(dashboard_router)
 @app.get("/")
 async def root():
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/dashboard", status_code=302)
+    return RedirectResponse(url="/dashboard/", status_code=302)
+
+
+# Serve the Next.js operator dashboard (static export) at /dashboard.
+# Built artifacts live in dashboard/out (committed; Replit Autoscale does
+# not run `npm run build`). The legacy HTML dashboard stays at
+# /dashboard-classic as a fallback.
+_DASH_OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "dashboard", "out")
+if os.path.isdir(_DASH_OUT):
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/dashboard", StaticFiles(directory=_DASH_OUT, html=True),
+              name="dashboard")
+else:
+    print(f"[main] dashboard static export not found at {_DASH_OUT} "
+          f"— /dashboard will 404 until `npm run build` is run in dashboard/")
 
 
 @app.post("/api/approve-week")
@@ -479,7 +494,7 @@ async def boost_revenue():
     result = await loop.run_in_executor(None, _run_boost)
     from fastapi.responses import RedirectResponse
     if result.get("ok"):
-        return RedirectResponse(url="/dashboard", status_code=303)
+        return RedirectResponse(url="/dashboard/", status_code=303)
     return JSONResponse(result, status_code=500)
 
 
