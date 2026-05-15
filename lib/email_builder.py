@@ -65,7 +65,8 @@ def _split_hook_and_body(body_md: str) -> tuple[str, str]:
     if not paras:
         return "", ""
     hook = _inline_format(paras[0].replace("\n", " "))
-    remaining = "\n\n".join(paras[1:])
+    # Cap at 3 body paragraphs — email should tease, not tell the whole story.
+    remaining = "\n\n".join(paras[1:4])
     return hook, remaining
 
 

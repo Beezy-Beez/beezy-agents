@@ -185,7 +185,7 @@ def auto_create_pending() -> str:
     """
     with psycopg.connect(DATABASE_URL) as conn:
         rows = conn.execute(
-            "SELECT number FROM issues WHERE status = 'draft' ORDER BY number ASC LIMIT 5"
+            "SELECT number FROM issues WHERE status = 'draft' AND shopify_page_id IS NOT NULL ORDER BY number ASC LIMIT 5"
         ).fetchall()
 
     if not rows:
@@ -268,13 +268,13 @@ def create_campaign_for_issue(issue_number: int) -> dict:
 
     print(f"[campaign] Creating template...")
     template_id = _create_template(
-        f"Hive Mind {number:03d} -- {subject_line[:50]}", html
+        f"Hive Mind {number:03d}", html
     )
     print(f"[campaign]   template_id: {template_id}")
 
     print(f"[campaign] Creating campaign + message...")
     campaign_id, message_id = _create_campaign(
-        name=f"Hive Mind -- Issue {number:03d} -- {subject_line[:60]}",
+        name=f"Hive Mind -- Issue {number:03d}",
         subject=subject_line,
         from_email=from_email,
         from_label=from_label,
