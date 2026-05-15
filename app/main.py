@@ -172,6 +172,15 @@ def _run_cron_jobs(now: datetime) -> None:
         except Exception as e:
             print(f"[cron] weekly brief error: {e}")
 
+    # Monday 9:30am: escalation nudge if week still not approved
+    if now.weekday() == 0 and h == 9 and m == 30:
+        try:
+            from pacing.weekly_brief import run_approval_nudge
+            print("[cron] approval nudge")
+            run_approval_nudge()
+        except Exception as e:
+            print(f"[cron] approval nudge error: {e}")
+
     import calendar as _cal
     last_day = _cal.monthrange(now.year, now.month)[1]
     if now.day == last_day - 7 and h == 9 and m == 0:

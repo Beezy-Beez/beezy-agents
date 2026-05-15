@@ -679,7 +679,7 @@ def run(slot: dict) -> dict:
     # ── 60-minute preview window ──────────────────────────────────────────
     print("[beezy_campaign] Posting preview — 60-minute cancel window...")
     _post_preview(slot, copy, campaign_id, cdn_url, ab_subject=ab_subject)
-    _store_pending_schedule(campaign_id, slot, copy, cdn_url, page_url, ab_subject=ab_subject)
+    _store_pending_schedule(campaign_id, message_id, slot, copy, cdn_url, page_url, ab_subject=ab_subject)
 
     camp_url = "https://www.klaviyo.com/campaign/" + campaign_id + "/wizard"
     print("[beezy_campaign]   Preview posted. Auto-schedules in 60 min: " + camp_url)
@@ -714,21 +714,33 @@ def _post_preview(slot: dict, copy: dict, campaign_id: str, image_url: str, ab_s
     httpx.post(webhook, json={"text": "Campaign preview", "blocks": blocks}, timeout=10)
 
 
-def _store_pending_schedule(campaign_id: str, slot: dict, copy: dict, image_url: str, page_url: str, ab_subject: str = "") -> None:
+def _subject_type_to_send(audience: str, has_ab: bool, patterns: dict) -> str:
+    """Alternate curiosity/benefit per audience using last_used from subject_patterns."""
+    if not has_ab:
+        return "curiosity"
+    last = patterns.get(audience, {}).get("last_used", "benefit")  # first time: send curiosity
+    return "benefit" if last == "curiosity" else "curiosity"
+
+
+def _store_pending_schedule(campaign_id: str, message_id: str, slot: dict, copy: dict, image_url: str, page_url: str, ab_subject: str = "") -> None:
     """Store campaign in agent_state as pending_schedule so the cron can auto-schedule it after 60 min."""
     try:
         from db.connection import get_conn
         now_iso = datetime.now(timezone.utc).isoformat()
+        audience = slot.get("audience", "")
+        patterns = _load_subject_patterns()
+        subject_type_to_send = _subject_type_to_send(audience, bool(ab_subject), patterns)
         entry = {
             "campaign_id": campaign_id,
+            "message_id": message_id,
             "slot": slot,
             "copy": {k: copy.get(k, "") for k in ("subject", "send_time_est", "from_label")},
             "image_url": image_url,
             "page_url": page_url,
             "queued_at": now_iso,
             "cancelled": False,
-            "subject_type": "curiosity",  # primary subject is always curiosity-first
-            "ab_subject": ab_subject,     # benefit-focused alt (empty if small segment)
+            "subject_type_to_send": subject_type_to_send,
+            "ab_subject": ab_subject,
         }
         with get_conn() as conn:
             row = conn.execute("SELECT value FROM agent_state WHERE key='pending_schedules'").fetchone()
@@ -742,6 +754,27 @@ def _store_pending_schedule(campaign_id: str, slot: dict, copy: dict, image_url:
             conn.commit()
     except Exception as e:
         print(f"[beezy_campaign] pending_schedule store error: {e}")
+
+
+def _patch_message_subject(message_id: str, subject: str) -> None:
+    """PATCH the campaign-message subject in Klaviyo. Used to swap A→B subject before scheduling."""
+    headers = {
+        "Authorization": "Klaviyo-API-Key " + os.environ.get("KLAVIYO_API_KEY", ""),
+        "revision": "2025-10-15",
+        "Content-Type": "application/json",
+    }
+    resp = httpx.patch(
+        f"https://a.klaviyo.com/api/campaign-messages/{message_id}/",
+        headers=headers,
+        timeout=20,
+        json={"data": {
+            "type": "campaign-message",
+            "id": message_id,
+            "attributes": {"definition": {"content": {"subject": subject}}},
+        }},
+    )
+    if resp.status_code not in (200, 204):
+        raise RuntimeError(f"PATCH campaign-message {resp.status_code}: {resp.text[:200]}")
 
 
 def check_pending_schedules() -> None:
@@ -768,21 +801,60 @@ def check_pending_schedules() -> None:
             updated.append(entry)  # keep — not yet 60 minutes
             continue
         # Time to schedule
-        campaign_id = entry["campaign_id"]
-        slot = entry.get("slot", {})
-        subject_type = entry.get("subject_type", "curiosity")
-        ab_subject = entry.get("ab_subject", "")
-        print(f"[check_pending_schedules] scheduling {campaign_id} after {age_minutes:.0f}min")
+        campaign_id   = entry["campaign_id"]
+        message_id    = entry.get("message_id", "")
+        slot          = entry.get("slot", {})
+        audience      = slot.get("audience", "")
+        subject_type  = entry.get("subject_type_to_send", "curiosity")
+        ab_subject    = entry.get("ab_subject", "")
+        primary_subj  = entry.get("copy", {}).get("subject", "")
+
+        print(f"[check_pending_schedules] scheduling {campaign_id} — subject_type={subject_type} after {age_minutes:.0f}min")
+
+        # Swap to benefit subject if warranted
+        if subject_type == "benefit" and ab_subject and message_id:
+            try:
+                _patch_message_subject(message_id, ab_subject)
+                print(f"[check_pending_schedules]   Patched subject to benefit: {ab_subject[:60]}")
+            except Exception as pe:
+                print(f"[check_pending_schedules]   Subject patch failed (sending curiosity): {pe}")
+                subject_type = "curiosity"
+
         try:
             sched_result = schedule_campaign(campaign_id, slot)
-            note = f"scheduled: {sched_result.get('send_time', '?')} | subject_type:{subject_type}"
-            if ab_subject:
-                note += f" | ab_subject:{ab_subject[:60]}"
         except Exception as se:
-            note = "schedule_error: " + str(se)[:60]
             updated.append(entry)  # retry next pass
+            print(f"[check_pending_schedules]   schedule_error: {se}")
             continue
-        print(f"[check_pending_schedules]   {campaign_id}: {note}")
+
+        send_time = sched_result.get("send_time", "?")
+        print(f"[check_pending_schedules]   {campaign_id}: scheduled {send_time} | {subject_type}")
+
+        # Persist subject_type to calendar_executions notes and update subject_patterns
+        try:
+            from db.connection import get_conn
+            with get_conn() as conn:
+                conn.execute(
+                    "UPDATE calendar_executions "
+                    "SET notes = COALESCE(notes,'') || ' | subject_type:' || %s "
+                    "WHERE klaviyo_campaign_id = %s",
+                    (subject_type, campaign_id)
+                )
+                # Update last_used in subject_patterns so next send alternates
+                row = conn.execute("SELECT value FROM agent_state WHERE key='subject_patterns'").fetchone()
+                sp = json.loads(row[0]) if row else {}
+                aud_data = sp.get(audience, {})
+                aud_data["last_used"] = subject_type
+                sp[audience] = aud_data
+                conn.execute(
+                    "INSERT INTO agent_state (key, value, updated_at) VALUES ('subject_patterns', %s, NOW()) "
+                    "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                    (json.dumps(sp),)
+                )
+                conn.commit()
+        except Exception as de:
+            print(f"[check_pending_schedules]   notes/pattern update error: {de}")
+
         # Don't add to updated — removes from pending list
 
     try:

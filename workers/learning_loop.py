@@ -123,6 +123,60 @@ def _get_underperformers(conn, days: int = 30, limit: int = 5) -> list[dict]:
     ]
 
 
+# ── A/B subject pattern learning ──────────────────────────────────────────────
+
+def _update_subject_patterns(conn, perf: list[dict]) -> None:
+    """Read finalized calendar_executions notes, compute RPR by subject_type per audience,
+    write winner to agent_state['subject_patterns'] when ≥2 sends per type exist."""
+    by_aud_type: dict[tuple, list] = {}
+    for p in perf:
+        notes = p.get("notes", "") or ""
+        rpr   = p.get("actual_rpr", 0) or 0
+        if "subject_type:" not in notes or rpr <= 0:
+            continue
+        subject_type = None
+        for part in notes.split("|"):
+            part = part.strip()
+            if part.startswith("subject_type:"):
+                subject_type = part.split(":", 1)[1].strip()
+                break
+        if not subject_type:
+            continue
+        by_aud_type.setdefault((p["audience"], subject_type), []).append(rpr)
+
+    if not by_aud_type:
+        return
+
+    row = conn.execute("SELECT value FROM agent_state WHERE key='subject_patterns'").fetchone()
+    sp = json.loads(row[0]) if row else {}
+
+    audiences = {aud for aud, _ in by_aud_type}
+    for aud in audiences:
+        c_rprs = by_aud_type.get((aud, "curiosity"), [])
+        b_rprs = by_aud_type.get((aud, "benefit"),   [])
+        aud_data = sp.get(aud, {})
+        if c_rprs:
+            aud_data["avg_rpr_curiosity"] = round(sum(c_rprs) / len(c_rprs), 4)
+            aud_data["sends_curiosity"]   = len(c_rprs)
+        if b_rprs:
+            aud_data["avg_rpr_benefit"] = round(sum(b_rprs) / len(b_rprs), 4)
+            aud_data["sends_benefit"]   = len(b_rprs)
+        if len(c_rprs) >= 2 and len(b_rprs) >= 2:
+            winner = "curiosity" if aud_data.get("avg_rpr_curiosity", 0) >= aud_data.get("avg_rpr_benefit", 0) else "benefit"
+            aud_data["winning_type"] = winner
+            print(f"[learning_loop/patterns] {aud}: curiosity ${aud_data.get('avg_rpr_curiosity',0):.4f} "
+                  f"vs benefit ${aud_data.get('avg_rpr_benefit',0):.4f} → {winner}")
+        sp[aud] = aud_data
+
+    conn.execute(
+        "INSERT INTO agent_state (key, value, updated_at) VALUES ('subject_patterns', %s, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+        (json.dumps(sp),)
+    )
+    conn.commit()
+    print(f"[learning_loop/patterns] Updated subject_patterns for {len(audiences)} audience(s)")
+
+
 # ── Weekly review (Sunday 9pm) ─────────────────────────────────────────────────
 
 def run_weekly() -> str:
@@ -205,6 +259,12 @@ def run_weekly() -> str:
             lines.append("  ✅ On track. Maintain current cadence.")
         else:
             lines.append("  📊 Moderate pace. Hold steady, monitor daily.")
+
+        # Close A/B feedback loop: parse subject_type from notes, update winner in subject_patterns
+        try:
+            _update_subject_patterns(conn, perf)
+        except Exception as sp_err:
+            print(f"[learning_loop] subject_patterns update failed (non-fatal): {sp_err}")
 
         report = "\n".join(lines)
 

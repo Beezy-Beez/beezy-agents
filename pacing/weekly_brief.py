@@ -53,8 +53,10 @@ def _approval_token(week_start: date) -> str:
 def _is_approved(conn, week_start: date) -> bool:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT 1 FROM calendar_approvals WHERE week_start = %s AND approved_at IS NOT NULL LIMIT 1",
-            (week_start,)
+            "SELECT 1 FROM calendar_approvals "
+            "WHERE week_start <= %s AND %s < week_start + INTERVAL '7 days' "
+            "AND approved_at IS NOT NULL LIMIT 1",
+            (week_start, week_start)
         )
         return cur.fetchone() is not None
 
@@ -202,6 +204,51 @@ def run_weekly_brief() -> None:
         body="\n".join(body_lines),
     )
     print("[weekly_brief] Posted " + str(len(slots)) + " slots for week of " + week_start.isoformat())
+
+
+def run_approval_nudge() -> None:
+    """Monday-morning escalation: post a strong reminder if this week is still unapproved.
+
+    Called by cron at 9:30am Monday. No-op if week is already approved.
+    """
+    today      = date.today()
+    week_start = today - timedelta(days=today.weekday())  # Monday of current week
+
+    with get_conn() as conn:
+        if _is_approved(conn, week_start):
+            print("[weekly_brief/nudge] Week already approved — no nudge needed")
+            return
+
+        decision_id, all_slots = _latest_calendar(conn)
+
+    slots = _week_slots(all_slots, week_start) if decision_id else []
+    slot_count = len(slots)
+    total_rev  = sum(
+        float(s.get("revenue_estimate", 0) or 0)
+        for s in slots
+        if s.get("content_type") not in ("seo_blog", "flow_experiment")
+    )
+
+    lines = [
+        f"*{slot_count} campaigns are ready to go — but nothing is running yet.*",
+        f"Projected revenue this week: *${total_rev:,.0f}*",
+        "",
+        "Campaigns dispatch automatically every morning at 8am once you approve.",
+        "The longer approval waits, the more today's sends slip.",
+        "",
+        "✅ Type `approved week` in this channel to activate everything.",
+        "_Or click *Approve All Weeks* on the dashboard._",
+    ]
+
+    post_draft(
+        title="Action needed — this week's campaigns are paused",
+        summary_lines=[
+            f"{slot_count} campaigns waiting  ·  est. ${total_rev:,.0f} this week",
+            "Not approved yet — orchestrator is idle",
+        ],
+        body="\n".join(lines),
+    )
+    print(f"[weekly_brief/nudge] Approval nudge posted — {slot_count} slots, ${total_rev:,.0f} projected")
 
 
 if __name__ == "__main__":
