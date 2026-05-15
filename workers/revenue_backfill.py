@@ -20,6 +20,7 @@ import re
 from datetime import date, timedelta
 
 import httpx
+from config import KLAVIYO_REVISION
 
 CONVERSION_METRIC_ID = "X93gjq"  # Placed Order
 
@@ -27,7 +28,7 @@ CONVERSION_METRIC_ID = "X93gjq"  # Placed Order
 def _klaviyo_headers() -> dict:
     return {
         "Authorization": "Klaviyo-API-Key " + os.environ.get("KLAVIYO_API_KEY", ""),
-        "revision": "2025-10-15",
+        "revision": KLAVIYO_REVISION,
         "Content-Type": "application/json",
         "Accept": "application/json",
     }

@@ -34,9 +34,7 @@ Invented numbers — even conservative ones — produce calendars that are 15–
 
 **Content schedule (confirmed):** Hive Mind every 3 days from Issue 014 (May 15, prospects only, EXCLUDE customers, 8pm). Sleep audio every 3 days offset 1 day (seal 8:15pm + customers 8pm). Pre-paid 2–3x/month. SMS 2–3x/week. All 7 days valid — never skip weekends.
 
-**Known issues:**
-- Klaviyo revenue pull from Replit returns $0 (Neon timeout during Opus; retry installed).
-- No auto-scheduling yet — campaigns deploy to DRAFT, Boris must manually schedule.
+**Known issues:** _(none currently)_
 
 ---
 
@@ -96,9 +94,9 @@ Workers don't contain content logic. They invoke existing Skills via the Anthrop
 
 ## Autonomy tiers
 
-- **Tier 1 (full auto):** ingestion, pacing brain, email campaign creation to Klaviyo draft, SEO blog publish
+- **Tier 1 (full auto):** ingestion, pacing brain, email campaign creation to Klaviyo draft, SEO blog publish, sleep audio (script → image → page → campaigns; Boris only feeds script to sleep-audio-platform for TTS)
 - **Tier 2 (approve-once):** calendar week approval gates orchestrator; SMS draft to Slack for Boris review; flow fix via Slack button
-- **Tier 3 (notify-only):** sleep audio (Slack checklist, human deploys); flow experiments (Boris implements manually)
+- **Tier 3 (notify-only):** flow experiments (Boris implements manually in Klaviyo)
 
 ---
 
@@ -126,17 +124,21 @@ The server runs two async background loops: a 5s Slack poller (`_slack_loop`) an
 | Every 4h (0,4,8,12,16,20) | Daily | Shopify + Klaviyo ingestion sync | `ingestion.sync` |
 | 7:30am | Daily | Pacing brain snapshot → Slack | `pacing.cron.run_daily` |
 | 7:35am | Daily | Pacing cache refresh (Klaviyo MTD) | `workers.pacing_cache.refresh_pacing_cache` |
+| 7:40am | Daily | Audience health monitor (STALE alert) | `workers.audience_health.run_audience_health` |
 | 8:00am | Daily | Orchestrator — dispatch today's slots | `pacing.orchestrator.run_daily` |
+| 8:05am | Daily | Morning brief → Slack daily digest | `workers.morning_brief.run_morning_brief` |
 | 9:00am | Daily | Revenue backfill (72h attribution window) | `workers.revenue_backfill.run_backfill` |
 | 10:00am | Daily | Hive Mind campaign auto-create (pending issues) | `workers.klaviyo_campaign.auto_create_pending` |
-| 9pm | Sunday | Weekly performance review + adjustments | `workers.learning_loop.run_weekly` |
-| 9pm | Sunday | Weekly approval brief (next 7 days to Slack) | `pacing.weekly_brief.run_weekly_brief` |
+| 10:30am | Daily | Deliverability check — bounce/spam/unsub rates vs thresholds | `workers.deliverability_monitor.run_deliverability_check` |
+| 9:00pm | Sunday | Weekly performance review + adjustments | `workers.learning_loop.run_weekly` |
+| 9:05pm | Sunday | Weekly approval brief (next 7 days to Slack) | `pacing.weekly_brief.run_weekly_brief` |
 | 9:15pm | Sunday | Flow health check + fix suggestions | `workers.flow_monitor.run_flow_check` |
+| 9:30am | Monday | Approval nudge if this week still not approved | `pacing.weekly_brief.run_approval_nudge` |
 | 9:30am | 15th | Mid-month pacing check | `workers.learning_loop.run_biweekly` |
 | 9:30am | 1st | Monthly retrospective + RPR table update | `workers.learning_loop.run_monthly` |
 | 9am | 7 days before month-end | Calendar generation (next month) | `pacing.calendar.run_monthly` |
 
-**Dependency chain:** Ingestion → Pacing snapshot → Cache refresh → Orchestrator → Revenue backfill
+**Dependency chain:** Ingestion → Pacing snapshot → Cache refresh → Audience health → Orchestrator → Morning brief → Revenue backfill
 
 **NOTE:** The `scripts/cron_dispatch.py` Scheduled Deployment is neutered (`echo ok`). All jobs run in the web server background loop. If ever needed, `cron_dispatch.py` must start with:
 ```python
@@ -250,7 +252,7 @@ All tables live in Neon Postgres. `schema.sql` is the base; `db/migrations/` hol
 | **R2** | **7-day cooldown ≥168h** | **No send to same audience within 7 days. NON-NEGOTIABLE.** | **Yes** |
 | R3 | Theme 5d gap ≥120h | Same `content_type` to same audience: ≥5d gap | No |
 | R4 | Active Seal weekly <4 | `active_seal`/`active_subscribers`: ≤3 sends in 7 days | No |
-| R5 | Burned audience list | STUB — always passes | No |
+| R5 | Burned audience list | Reads `agent_state['burned_audiences']`; fails if audience key present | No |
 | R6 | Revenue floor ≥$300 | `slot.revenue_estimate ≥ 300`; skipped if no estimate | No |
 | R7 | Format kill list | Blocked combos: `active_seal+editorial`, `vip+pre_paid_bundle` | No |
 | R8 | Daily cadence ≤3 | Max 3 sends today across all audiences | No |
@@ -677,7 +679,7 @@ These live in `pacing/calendar_live_data.py` as `FALLBACK_RPR`/`FALLBACK_LIST_SI
 | `sniper_followup` | `beezy_campaign.py` | Tier 1 auto | Different angle from parent, same discount code |
 | `hive_mind` | `klaviyo_campaign.py` | Skip (owns its 10am cron) | Every 3 days from Issue 014 |
 | `seo_blog` | `seo_blog.py` | Tier 1 auto | `revenue_estimate` always 0 |
-| `sleep_audio` | `#beezy-new-episodes` watcher | Tier 3 notify | Posts Slack checklist; Boris deploys |
+| `sleep_audio` | `workers/sleep_audio_producer.py` | Tier 1 auto | Script → image → Shopify page → two Klaviyo campaigns → Slack posts full script for Boris to feed into sleep-audio-platform (TTS → Buzzsprout → posts to #beezy-new-episodes → watcher updates page with audio embed) |
 | `sms_campaign` | `post_draft()` | Tier 2 Slack draft | Boris reviews before send |
 | `flow_experiment` | `post_draft()` | Tier 3 notify | Boris manually implements in Klaviyo |
 
@@ -913,6 +915,7 @@ Pricing reference: Sonnet $3/$15 per 1M, Opus 4.7 $15/$75, Haiku $1/$5 (input/ou
 - **Don't check `status != 'dispatched'`** in `_already_ran` — must be `AND status != 'failed'` so failed slots retry
 - **Don't call `python scripts/publish_page.py` directly** — use `python -m scripts.publish_page`
 - **Don't run agents from shell without `sys.path.insert(0,'.')`** — produces `ModuleNotFoundError` even from the correct directory
+- **Don't call `conn.commit()` inside test helpers** — test fixture must call `conn.rollback()` in teardown; helpers just INSERT without committing. Committed test data creates phantom `calendar_executions` rows that poison R1/R2/R8 validator checks on the next run. (Pacing tests are the exception: `compute_pacing_state` opens its own connection so they need commit+explicit-DELETE cleanup.)
 
 ### Klaviyo REST
 - **Don't use hyphens in field names** — `send-options`, `use-smart-sending`, `tracking-options` all return 400. Must be underscores.
@@ -955,7 +958,7 @@ Pricing reference: Sonnet $3/$15 per 1M, Opus 4.7 $15/$75, Haiku $1/$5 (input/ou
 - Layer 2 core: `pacing/cron.py`, `pacing/orchestrator.py`, `pacing/weekly_brief.py`
 - Layer 1 math: `pacing/brain.py` (Phase 2A only)
 - `pacing/calendar.py` — Opus-driven monthly calendar generator
-- `workers/validator.py` — all 12 structural rules + 5 content checks (C1–C5)
+- `workers/validator.py` — all 17 rules: 12 structural (R1–R12) + 5 content checks (C1–C5); auto-fail: R2, R10, C1, C2, C3, C5
 - `workers/beezy_campaign.py` — full autonomous email pipeline
 - `workers/klaviyo_campaign.py` — Hive Mind campaign creator
 - `workers/seo_blog.py` — generation + Shopify publish
@@ -964,24 +967,28 @@ Pricing reference: Sonnet $3/$15 per 1M, Opus 4.7 $15/$75, Haiku $1/$5 (input/ou
 - `workers/learning_loop.py` — all three cadences (weekly/biweekly/monthly)
 - `workers/revenue_backfill.py` — 72h attribution finalization
 - `workers/klaviyo_backfill.py` — historical data import
-- `workers/pacing_cache.py` — daily Klaviyo MTD cache
+- `workers/pacing_cache.py` — daily Klaviyo MTD cache (with retry)
 - `workers/auto_schedule.py` — campaign scheduling
+- `workers/deliverability_monitor.py` — daily bounce/spam/unsub check; Slack alert if thresholds exceeded; `/api/run-deliverability-check` endpoint
+- `workers/hub_updater.py` — injects Hive Mind issue cards and episode cards into Shopify hub pages via sentinel comments
+- `workers/audience_health.py` — daily STALE audience detection; RPR trend per audience; writes to `agent_state['audience_health']`; Slack alert for money-on-the-table gaps
+- `workers/morning_brief.py` — 8:05am Slack digest: MTD revenue vs goal, pace mode, today's sends, action needed
+- `workers/run.py` — CLI for Hive Mind drafts: `python -m workers.run --skill hive_mind [--issue N] [--dry-run]`; reads DB state, calls skill, saves draft, generates cover image, posts to Slack
 - `workers/image_gen.py` — Higgsfield REST integration
 - `workers/shopify_publisher.py` — image upload + CDN polling
 - `workers/shopify_page_builder.py` — Hive Mind page HTML builder
 - `workers/skill_runner.py` — generic Anthropic invoker
-- `lib/slack.py`, `lib/email_builder.py`, `lib/shopify_admin.py`
+- `lib/slack.py`, `lib/email_builder.py`, `lib/email_builder_episode.py`, `lib/shopify_admin.py`
 - `agents/slack_agent.py` — Slack Web API polling + Claude routing
-- `app/main.py` — dual-loop server, 11 cron jobs, interactive endpoint
-- `app/dashboard.py` — live HTML dashboard
+- `app/main.py` — dual-loop server, 16 cron jobs, interactive endpoint
+- `app/dashboard.py` — live FastAPI HTML dashboard (primary dashboard)
+- `dashboard/` — Next.js dashboard (built, multi-route: analytics/audiences/calendar/content/flows/system; not yet deployed; talks to FastAPI backend via `NEXT_PUBLIC_API_URL`)
 
 ### Not built / known gaps
-- **Next.js dashboard:** deferred; `app/dashboard.py` is the FastAPI HTML dashboard (fully functional).
-- **Integration tests:** unit tests exist (validator, pacing, ingestion). No end-to-end tests for the full campaign dispatch chain.
-- **`sniper_followup`:** blocked by R2 because it uses full audience (non-opener segmentation not implemented). See "Known gaps" above.
+- **Next.js dashboard** (`dashboard/`) — fully built and compiles clean (`npm run build` passes). Has `vercel.json` and `.env.example`. Deploy: connect the `dashboard/` directory to a Vercel project, set env var `NEXT_PUBLIC_API_URL=https://<your-replit-app>.replit.app`. All 6 routes (analytics/audiences/calendar/content/flows/system) are live; API calls proxy to FastAPI backend.
 
 ### Recently completed (session May 2026)
-- **Tests:** 43 tests across `tests/test_pacing.py` and `tests/test_validator.py` — all 17 validator rules + pacing math covered.
+- **Tests:** 95 tests across `tests/test_pacing.py`, `tests/test_validator.py`, `tests/test_dispatch_chain.py`, and `tests/test_e2e_pipeline.py` — all 17 validator rules, pacing math, orchestrator routing, R5 burn list, R2 sniper exemption, sniper helpers, hub updater, full E2E pipeline (approval gate, BOOST/EASE/PUSH mode, sniper E2E, deliverability math, audience health flags). All pass.
 - **A/B subject testing:** `workers/beezy_campaign.py` — curiosity vs benefit subjects for large segments (>3k); patterns accumulated in `agent_state['subject_patterns']`; winner wired into calendar context.
 - **Revenue backfill:** `workers/revenue_backfill.py` — updates `actual_revenue`, `actual_rpr`, `is_preliminary=false` after 72h window; feeds subject_patterns learning loop.
 - **Dashboard data:** `app/dashboard.py` — all sections now show live data: campaign/flow revenue from performance table fallback, top performers from Klaviyo, audience RPR from segment_ids mapping.
@@ -997,10 +1004,17 @@ Pricing reference: Sonnet $3/$15 per 1M, Opus 4.7 $15/$75, Haiku $1/$5 (input/ou
 - **BOOST topic from calendar:** `pacing/orchestrator._boost_candidate_slot()` — looks up next unexecuted calendar slot for the audience before falling back to hardcoded topic angle; BOOST emails now match planned calendar narrative.
 - **Approval nudge:** `pacing/weekly_brief.run_approval_nudge()` — Monday 9:30am ET: posts urgent Slack reminder if this week's plan is still not approved; no-op if already approved.
 - **R2 parity fix:** `pacing/orchestrator._audience_in_cooldown()` mirrors validator R2 exactly — exclusive 7-day boundary, only dispatched/completed rows count. Prevents orchestrator BOOST from bypassing R2 rules the validator enforces.
+- **`sniper_followup` non-opener targeting:** `workers/beezy_campaign.py` — finds parent campaign via DB, pulls opener profile IDs from Klaviyo Events API (metric `WrnXmp`), creates a temporary exclusion list, passes it to campaign creation. Validator R2 updated with sniper exemption: allowed within 7-day window if parent `klaviyo_campaign` exists. 31/31 tests pass.
+- **Test DB isolation fixed:** `tests/test_validator.py` — fixture now calls `conn.rollback()` on teardown; `_insert_exec` no longer calls `conn.commit()`. Validator reads uncommitted data on the same connection. Zero phantom rows written to production on every test run. Cleaned 236 phantom rows caused by prior test runs committing directly to production.
+- **Hub page auto-updates:** `workers/hub_updater.py` — `add_issue_to_hubs(issue)` and `add_episode_to_hubs(metadata)` inject content cards into Shopify hub/archive pages using sentinel HTML comments (`<!-- HUB_SECTION_START -->` / `<!-- HUB_ITEMS_START -->`). Hive Mind issues trigger a full rebuild of `/pages/the-hive-mind` from DB + a prepend on `/pages/sleep-science-hub`. Episodes route by `episode_type` to the correct hub (sleep_story/soundscape → sleep-science-hub, guided/affirmation meditation → meditation-library, morning_meditation → morning-wellness-hub). Wired into `workers/klaviyo_campaign.create_campaign_for_issue()` and `agents/klaviyo_deployer.deploy_episode()`. Both calls are non-fatal (errors logged, pipeline continues).
+- **`pacing_cache.py` retry:** replaced bare `try/except` with `_post_report()` (429/5xx backoff, up to 5 retries, mirrors `ingestion/klaviyo.py` pattern) and `_write_cache()` (3-attempt retry on Neon write). Silent $0 on timeout no longer possible.
+- **`sleep_audio` pipeline (two-phase):** `workers/sleep_audio_producer.py` — orchestrator runs phase 1 on calendar slots: `invoke_skill("sleep_audio")` → Higgsfield image → Shopify CDN → Shopify landing page → saves episode stub to `episodes` DB → updates hub pages → Slack posts full script for Boris. Phase 2: Boris feeds script into sleep-audio-platform (TTS → Buzzsprout → posts metadata JSON to `#beezy-new-episodes`); the watcher calls `deploy_episode()` once, creating both Klaviyo campaigns with the Buzzsprout URL. Calling `deploy_episode()` in phase 1 (before audio exists) was a campaign-duplication bug — fixed by splitting into two phases.
+- **`deliverability_monitor.py` retry + field fix:** added `_post_with_retry()` (429/5xx backoff, 5 retries). Fixed stat field names (`unsubscribed` → `unsubscribes`); `hard_bounced` falls back to `bounced` if Klaviyo doesn't return it. Runs 10:30am ET daily.
+- **R5 validator implemented:** reads `agent_state['burned_audiences']` (JSON list of audience keys); fails if the slot's audience appears in the list. No longer a stub.
+- **Episodes DB table:** `episodes` table added to `db/schema.sql`. Audio archive is now DB-backed, same as Hive Mind `issues`. Hub pages can be fully rebuilt from DB if ever wiped.
 
 ### Known gaps / deferred
-- **`sniper_followup` R2:** R2 correctly blocks snipers because they use the full audience segment (non-opener targeting is not implemented at Klaviyo segment level). Fix requires creating a dynamic "non-openers" Klaviyo segment per campaign — deferred.
-- **End-to-end integration tests:** unit tests exist (validator, pacing, ingestion). No end-to-end tests for the full campaign dispatch chain.
+_(none — all known gaps resolved as of May 2026)_
 
 ---
 
@@ -1014,8 +1028,8 @@ Pricing reference: Sonnet $3/$15 per 1M, Opus 4.7 $15/$75, Haiku $1/$5 (input/ou
 6. ~~Dashboard~~ **DONE** — FastAPI HTML, live data from Klaviyo/performance table, approve buttons, top performers, audience health with RPR
 7. ~~Learning loop~~ **DONE** (all 3 cadences)
 8. ~~Skill prompt files~~ **DONE** — all 6 workers/prompts/*.md populated (campaign_email, flow_tuning, seo_blog, sleep_audio, sms, hive_mind)
-9. ~~Auto-scheduling~~ **DONE** — `workers/auto_schedule.py` sets `send_strategy` + triggers `campaign-send-jobs`; called from `beezy_campaign.py` line 777
-10. ~~Tests~~ **DONE** — 42 tests covering validator (17 rules) and pacing math; production-DB-safe
+9. ~~Auto-scheduling~~ **DONE** — `workers/auto_schedule.py` sets `send_strategy` + triggers `campaign-send-jobs`. Campaign created → written to `agent_state['pending_schedules']` → `check_pending_schedules()` fires every 5 min in cron loop → calls `schedule_campaign()`. Boris does not manually schedule.
+10. ~~Tests~~ **DONE** — 95 tests: validator (17 rules), pacing math, orchestrator routing, R5 burn list, R2 sniper exemption, sniper helpers, hub updater, E2E pipeline; production-DB-safe
 
 ---
 

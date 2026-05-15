@@ -254,7 +254,12 @@ HELP_TEXT = """*Beezy Agent Commands* — type any of these in #beezy-agents:
 `weekly review` — run the weekly performance review now
 `pacing check` — mid-month pacing check
 `monthly review` — run the monthly retrospective
-`flow check` — run flow health check"""
+`flow check` — run flow health check
+
+*Audience management:*
+`burn <audience>` — add audience to burn list (validator R5 blocks all sends)
+`unburn <audience>` — remove audience from burn list
+`burn list` — show current burn list"""
 
 MODIFY_SYSTEM = """You are a calendar editor for Beezy Beez Honey email marketing.
 
@@ -557,7 +562,7 @@ HANDLERS = {
     "approve_day":       _handle_approve_day,
     "deploy_today":      lambda conn, _: (_handle_deploy_today(), None)[0],
     "revenue_query":     lambda conn, _: _handle_revenue_query(conn),
-    "generate_calendar": lambda conn, _: "Calendar generation disabled in Slack. Ask in Claude conversation instead. Type calendar to see current page.",
+    "generate_calendar": lambda conn, _: _handle_generate_calendar(),
     "restore_calendar":  _handle_restore_calendar,
     "run_weekly_brief":  lambda conn, _: _handle_weekly_brief(),
     "deploy_episode":    lambda conn, _: _handle_deploy_episode(conn),
@@ -568,6 +573,9 @@ HANDLERS = {
     "weekly_review":     lambda conn, _: _handle_weekly_review(),
     "pacing_check":      lambda conn, _: _handle_pacing_check(),
     "monthly_review":    lambda conn, _: _handle_monthly_review(),
+    "burn_list":         lambda conn, _: _handle_burn_list(conn),
+    "burn_audience":     lambda conn, p: _handle_burn(conn, p.get("audience", "")),
+    "unburn_audience":   lambda conn, p: _handle_unburn(conn, p.get("audience", "")),
     "view_calendar":     _handle_view_calendar,
     "modify_calendar":   _handle_modify_calendar,
     "query_calendar":    _handle_query_calendar,
@@ -619,12 +627,19 @@ def _process_beezy_agents(conn) -> None:
                 "monthly review": {"action": "monthly_review"},
                 "flow check": {"action": "flow_check"},
                 "flow health": {"action": "flow_check"},
+                "burn list":   {"action": "burn_list"},
             }
             # Cancel campaign — "cancel ABC123"
             import re as _re
             cancel_match = _re.match(r'^cancel\s+([A-Za-z0-9]+)$', text_lower)
+            burn_match   = _re.match(r'^burn\s+([a-z0-9_\- ]+)$', text_lower)
+            unburn_match = _re.match(r'^unburn\s+([a-z0-9_\- ]+)$', text_lower)
             if cancel_match:
                 result = {"action": "cancel_campaign", "params": {"campaign_id": cancel_match.group(1)}}
+            elif burn_match:
+                result = {"action": "burn_audience", "params": {"audience": burn_match.group(1).strip()}}
+            elif unburn_match:
+                result = {"action": "unburn_audience", "params": {"audience": unburn_match.group(1).strip()}}
             else:
                 result = fast_match.get(text_lower)
             if result:
@@ -729,6 +744,74 @@ def _handle_monthly_review():
     from workers.learning_loop import run_monthly
     result = run_monthly()
     return "Monthly review posted above."
+
+
+def _handle_burn(conn, audience: str) -> str:
+    """Add audience to the burn list in agent_state['burned_audiences']."""
+    import json as _json
+    audience = audience.strip().lower().replace(" ", "_").replace("-", "_")
+    if not audience:
+        return "Usage: `burn <audience>` — e.g. `burn lapsed_90d`"
+    row = conn.execute(
+        "SELECT value FROM agent_state WHERE key = 'burned_audiences' LIMIT 1"
+    ).fetchone()
+    data = _json.loads(row[0]) if row else {"audiences": []}
+    burned: list[str] = data.get("audiences") or []
+    if audience in burned:
+        return f"'{audience}' is already on the burn list."
+    burned.append(audience)
+    data["audiences"] = burned
+    data["updated_at"] = __import__("datetime").date.today().isoformat()
+    conn.execute(
+        "INSERT INTO agent_state (key, value, updated_at) VALUES ('burned_audiences', %s, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+        (_json.dumps(data),)
+    )
+    conn.commit()
+    return f"🔥 *{audience}* added to burn list — validator R5 will block all sends to this audience."
+
+
+def _handle_unburn(conn, audience: str) -> str:
+    """Remove audience from the burn list."""
+    import json as _json
+    audience = audience.strip().lower().replace(" ", "_").replace("-", "_")
+    if not audience:
+        return "Usage: `unburn <audience>` — e.g. `unburn lapsed_90d`"
+    row = conn.execute(
+        "SELECT value FROM agent_state WHERE key = 'burned_audiences' LIMIT 1"
+    ).fetchone()
+    if not row:
+        return f"No burn list found — '{audience}' was never burned."
+    data = _json.loads(row[0])
+    burned: list[str] = data.get("audiences") or []
+    if audience not in burned:
+        return f"'{audience}' is not on the burn list."
+    burned.remove(audience)
+    data["audiences"] = burned
+    data["updated_at"] = __import__("datetime").date.today().isoformat()
+    conn.execute(
+        "INSERT INTO agent_state (key, value, updated_at) VALUES ('burned_audiences', %s, NOW()) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+        (_json.dumps(data),)
+    )
+    conn.commit()
+    return f"✅ *{audience}* removed from burn list — sends are unblocked."
+
+
+def _handle_burn_list(conn) -> str:
+    """Show the current burn list."""
+    import json as _json
+    row = conn.execute(
+        "SELECT value FROM agent_state WHERE key = 'burned_audiences' LIMIT 1"
+    ).fetchone()
+    if not row:
+        return "No burn list defined — all audiences clear."
+    data = _json.loads(row[0]) if isinstance(row[0], str) else row[0]
+    burned = data.get("audiences") or []
+    updated = data.get("updated_at", "unknown")
+    if not burned:
+        return "Burn list is empty — all audiences clear."
+    return "🔥 *Burned audiences* (R5 will block sends):\n" + "\n".join(f"  • {a}" for a in burned) + f"\n_Last updated: {updated}_"
 
 
 def run_once() -> None:

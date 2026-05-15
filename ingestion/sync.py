@@ -279,6 +279,15 @@ def run_klaviyo_sync(window_hours: int = 4, lookback_days: int | None = None) ->
         }
 
 
+def run_sync(window_hours: int = 4, lookback_days: int | None = None) -> dict:
+    """Run both Shopify and Klaviyo ingestion. Called by the dashboard /api/run-ingestion endpoint."""
+    shopify = run_shopify_sync(window_hours=window_hours, lookback_days=lookback_days)
+    _maybe_notify("shopify", shopify)
+    klaviyo = run_klaviyo_sync(window_hours=window_hours, lookback_days=lookback_days)
+    _maybe_notify("klaviyo", klaviyo)
+    return {"shopify": shopify, "klaviyo": klaviyo}
+
+
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if len(argv) < 2:

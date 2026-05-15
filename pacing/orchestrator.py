@@ -64,10 +64,12 @@ def _is_approved(conn) -> bool:
 def _today_priority_mode(conn) -> str:
     """Read today's priority mode from priorities table. Default: maintain."""
     try:
-        row = conn.execute(
-            "SELECT prioritized_workers, pacing_snapshot FROM priorities WHERE effective_for=%s ORDER BY decided_at DESC LIMIT 1",
-            (date.today(),)
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT prioritized_workers FROM priorities WHERE effective_for=%s ORDER BY decided_at DESC LIMIT 1",
+                (date.today(),)
+            )
+            row = cur.fetchone()
         if row and row[0]:
             workers = row[0] if isinstance(row[0], list) else json.loads(row[0])
             return workers[0] if workers else "maintain"
@@ -195,6 +197,11 @@ def _ease_drop_weakest(slots: list[dict]) -> tuple[list[dict], dict | None]:
 
 
 def _mark(conn, decision_id, slot, status, notes="", klaviyo_campaign_id=None):
+    from lib.dryrun import is_dry_run
+    if is_dry_run():
+        print(f"[orchestrator/DRY RUN] would mark {slot.get('content_type')}/"
+              f"{slot.get('audience')} → {status} ({notes[:80]})")
+        return
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO calendar_executions "
@@ -210,6 +217,8 @@ def _mark(conn, decision_id, slot, status, notes="", klaviyo_campaign_id=None):
 def _handle_seo_blog(slot):
     from workers.seo_blog import run as seo_run
     result = seo_run(slot)
+    if isinstance(result, str):          # "blocked:..." / "skipped:..." / "failed:..."
+        return result
     return "published:" + result.get("url", "?")
 
 
@@ -217,7 +226,11 @@ def _handle_campaign(slot):
     """Tier 1: generate copy + create Klaviyo DRAFT campaign automatically."""
     from workers.beezy_campaign import run as campaign_run
     result = campaign_run(slot)
-    return "klaviyo_draft:" + result.get("campaign_id","?")
+    # run() returns a dict on success, or a status string ("blocked:FAIL") when
+    # the validator blocks. Never call .get() on a string.
+    if isinstance(result, str):
+        return result
+    return "klaviyo_draft:" + result.get("campaign_id", "?")
 
 
 def _handle_flow_experiment(slot):
@@ -234,21 +247,8 @@ def _handle_flow_experiment(slot):
 
 
 def _handle_sleep_audio(slot):
-    post_draft(
-        title="Sleep Audio Slot -- " + slot["date"],
-        summary_lines=[
-            "Topic:     " + slot.get("topic_angle","?"),
-            "Audience:  " + slot.get("audience","?"),
-            "Rev. Est.: $" + str(int(slot.get("revenue_estimate",0))),
-        ],
-        body=(
-            "*Checklist:*\n"
-            "1. Check *#beezy-new-episodes* -- is an episode ready?\n"
-            "2. If yes -> open episode deployer Claude chat: 'deploy latest episode'\n"
-            "3. If no -> open sleep-audio-platform chat and produce: _" + slot.get("topic_angle","") + "_"
-        ),
-    )
-    return "slack_notified"
+    from workers.sleep_audio_producer import run_sleep_audio_slot
+    return run_sleep_audio_slot(slot)
 
 
 def _handle_sms(slot):
@@ -260,7 +260,9 @@ def _handle_sms(slot):
 HANDLERS = {
     "seo_blog":         _handle_seo_blog,
     "klaviyo_campaign": _handle_campaign,
-    "sniper_followup":  _handle_campaign,
+    # sniper_followup intentionally disabled — same-day same-audience design
+    # conflicts with validator R1/R6. Skipped until reworked.
+    "sniper_followup":  lambda s: "skipped:sniper_followup_disabled",
     "flow_experiment":  _handle_flow_experiment,
     "sleep_audio":      _handle_sleep_audio,
     "sms_campaign":     _handle_sms,
@@ -318,7 +320,7 @@ def run_daily():
         if not today_slots:
             return
 
-        dispatched, skipped, failed = [], [], []
+        dispatched, skipped, failed, blocked = [], [], [], []
         for slot in today_slots:
             ct    = slot.get("content_type","unknown")
             label = ct + "/" + slot.get("audience","?")
@@ -341,8 +343,20 @@ def run_daily():
                     klaviyo_id = notes["campaign_id"]
                 if isinstance(notes, dict):
                     notes = "klaviyo_draft:" + notes.get("campaign_id", "?")
-                _mark(conn, decision_id, slot, "dispatched", notes, klaviyo_campaign_id=klaviyo_id)
-                dispatched.append(label + ":" + (notes or ""))
+                notes = notes or ""
+
+                # A clean validator block or intentional skip is NOT a failure.
+                if notes.startswith("blocked:"):
+                    _mark(conn, decision_id, slot, "blocked", notes)
+                    blocked.append(label + ":" + notes)
+                    print("[orchestrator]   BLOCKED " + label + ": " + notes)
+                elif notes.startswith("skipped:"):
+                    _mark(conn, decision_id, slot, "skipped", notes)
+                    skipped.append(label + ":" + notes)
+                    print("[orchestrator]   SKIPPED " + label + ": " + notes)
+                else:
+                    _mark(conn, decision_id, slot, "dispatched", notes, klaviyo_campaign_id=klaviyo_id)
+                    dispatched.append(label + ":" + notes)
             except Exception as e:
                 err = str(e)
                 print("[orchestrator]   FAIL " + label + ": " + err)
@@ -356,7 +370,8 @@ def run_daily():
 
         lines = [
             "Date: " + date.today().isoformat() + "  |  Mode: " + mode_badge,
-            "Dispatched: " + str(len(dispatched)) + "  Skipped: " + str(len(skipped)) + "  Failed: " + str(len(failed)),
+            "Dispatched: " + str(len(dispatched)) + "  Skipped: " + str(len(skipped)) +
+            "  Blocked: " + str(len(blocked)) + "  Failed: " + str(len(failed)),
         ]
         if boost_slot:
             lines.append(
@@ -371,6 +386,8 @@ def run_daily():
             )
         if dispatched:
             lines.append("OK " + " | ".join(dispatched[:6]))
+        if blocked:
+            lines.append("BLOCKED " + " | ".join(blocked))
         if failed:
             lines.append("FAIL " + " | ".join(failed))
 

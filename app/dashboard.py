@@ -1,6 +1,7 @@
 """Beezy Agents Dashboard — /dashboard control center."""
 from __future__ import annotations
 import json, os
+from config import KLAVIYO_REVISION
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter
@@ -382,7 +383,7 @@ def pull_klaviyo_audience_health() -> list:
 
     headers = {
         "Authorization": f"Klaviyo-API-Key {api_key}",
-        "revision": "2025-10-15",
+        "revision": KLAVIYO_REVISION,
         "Content-Type": "application/json",
         "Accept": "application/json",
     }

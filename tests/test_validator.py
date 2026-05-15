@@ -12,10 +12,18 @@ from workers.validator import validate_campaign
 
 @pytest.fixture
 def conn():
-    """Real Postgres connection, auto-rollback after each test."""
+    """Real Postgres connection, auto-rollback after each test.
+
+    psycopg3 defaults to autocommit=False.  We never call conn.commit() inside
+    tests, so every INSERT is invisible to other connections and rolls back
+    automatically when this fixture tears down.  This keeps the production DB clean.
+    """
     from db.connection import get_conn
     with get_conn() as c:
-        yield c
+        try:
+            yield c
+        finally:
+            c.rollback()
 
 
 def _slot(audience="lapsed_30d", content_type="klaviyo_campaign", **kwargs):
@@ -40,14 +48,17 @@ def _copy(**kwargs):
 
 
 def _insert_exec(conn, audience, slot_date, content_type="klaviyo_campaign", status="dispatched"):
-    """Insert a calendar_executions row."""
+    """Insert a calendar_executions row within the current transaction (no commit).
+
+    Data is visible to subsequent validator calls on the same connection but
+    never committed to the DB — the fixture teardown rolls it back.
+    """
     eid = str(uuid.uuid4())
     conn.execute(
         "INSERT INTO calendar_executions (id, decision_id, slot_date, content_type, audience, status) "
         "VALUES (%s, %s, %s, %s, %s, %s)",
         (eid, str(uuid.uuid4()), slot_date, content_type, audience, status)
     )
-    conn.commit()
     return eid
 
 

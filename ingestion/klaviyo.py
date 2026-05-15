@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Klaviyo pins API behavior to a revision date sent in the `revision` header.
 # Bump when adopting a newer stable revision; revisions are supported for ~12 months.
-KLAVIYO_API_REVISION = "2025-10-15"
+KLAVIYO_API_REVISION = config.KLAVIYO_REVISION
 
 KLAVIYO_BASE = "https://a.klaviyo.com/api"
 KLAVIYO_CONVERSION_METRIC_ID = "X93gjq"  # Placed Order — drives conversions + conversion_value

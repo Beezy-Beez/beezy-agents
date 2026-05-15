@@ -18,6 +18,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
+from config import KLAVIYO_REVISION
 
 TRACKING_PARAMS = [
     {"type": "static",  "value": "Klaviyo",       "name": "utm_source"},
@@ -33,7 +34,7 @@ TRACKING_PARAMS = [
 def _headers() -> dict:
     return {
         "Authorization": "Klaviyo-API-Key " + os.environ.get("KLAVIYO_API_KEY", ""),
-        "revision": "2025-10-15",
+        "revision": KLAVIYO_REVISION,
         "Content-Type": "application/json",
     }
 
@@ -122,6 +123,71 @@ def deploy_campaign(html: str, name: str, subject: str, from_email: str,
     return "https://www.klaviyo.com/campaign/" + camp_id + "/wizard"
 
 
+def _episode_subjects(title: str, episode_type: str) -> tuple[str, str]:
+    """
+    Returns (subject_a, subject_b) for A/B testing episode emails.
+    subject_a = curiosity-led, subject_b = benefit-led.
+    Chooses which to send first based on subject_patterns in agent_state.
+    """
+    _CURIOSITY = {
+        "sleep_story":        f"Tonight: {title}",
+        "guided_meditation":  f"5 minutes could change tonight — {title}",
+        "affirmation_meditation": f"What if you woke up feeling different? — {title}",
+        "morning_meditation": f"Start tomorrow right — {title}",
+        "soundscape":         f"Something new for tonight — {title}",
+    }
+    _BENEFIT = {
+        "sleep_story":        f"New sleep story for members: {title}",
+        "guided_meditation":  f"New guided meditation: {title}",
+        "affirmation_meditation": f"New affirmation session: {title}",
+        "morning_meditation": f"New morning session: {title}",
+        "soundscape":         f"New soundscape: {title}",
+    }
+    a = _CURIOSITY.get(episode_type, f"Tonight: {title}")
+    b = _BENEFIT.get(episode_type, f"New sleep audio: {title}")
+    return a, b
+
+
+def _pick_episode_subject(audience_key: str, subj_a: str, subj_b: str) -> tuple[str, str]:
+    """
+    Alternates curiosity / benefit based on subject_patterns in agent_state.
+    Returns (subject_to_send, other_subject).
+    """
+    try:
+        from db.connection import get_conn
+        with get_conn() as c:
+            row = c.execute(
+                "SELECT value FROM agent_state WHERE key='subject_patterns'"
+            ).fetchone()
+        patterns = json.loads(row[0]) if row else {}
+    except Exception:
+        patterns = {}
+    last_used = patterns.get(audience_key, {}).get("last_used", "benefit")
+    if last_used == "curiosity":
+        return subj_b, subj_a   # this time: benefit
+    return subj_a, subj_b       # this time: curiosity (default)
+
+
+def _record_episode_subject(audience_key: str, used: str) -> None:
+    """Persist which subject variant was sent for this audience."""
+    try:
+        from db.connection import get_conn
+        with get_conn() as c:
+            row = c.execute("SELECT value FROM agent_state WHERE key='subject_patterns'").fetchone()
+            patterns = json.loads(row[0]) if row else {}
+            if audience_key not in patterns:
+                patterns[audience_key] = {}
+            patterns[audience_key]["last_used"] = used
+            c.execute(
+                "INSERT INTO agent_state (key, value, updated_at) VALUES ('subject_patterns', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                (json.dumps(patterns),)
+            )
+            c.commit()
+    except Exception as exc:
+        print("[deployer] subject_patterns update failed (non-fatal): " + str(exc))
+
+
 def deploy_episode(metadata: dict, conn=None) -> str:
     """
     Deploy a sleep audio episode from #beezy-new-episodes metadata.
@@ -137,26 +203,81 @@ def deploy_episode(metadata: dict, conn=None) -> str:
 
     email_a_html, email_b_html = build_episode_emails(metadata, page_url)
 
+    # A/B subject selection
+    subj_a, subj_b = _episode_subjects(title, episode_type)
+    subj_a_send, subj_a_alt = _pick_episode_subject("episode_engaged_customers_" + episode_type, subj_a, subj_b)
+    subj_b_send, subj_b_alt = _pick_episode_subject("episode_active_seal_" + episode_type, subj_a, subj_b)
+
     # Email A — Engaged Customers excl Active Seal at 8pm ET
     camp_a_url = deploy_campaign(
         html=email_a_html,
         name=title + " | Engaged Customers | " + metadata.get("suggested_send_date",""),
-        subject="Tonight on Sleep Better: " + title,
+        subject=subj_a_send,
         from_email=from_email,
         from_label="Beezy Beez",
         segment_ids=["RvtHdn"],
         excluded_ids=["UBFUcH"],
+    )
+    _record_episode_subject(
+        "episode_engaged_customers_" + episode_type,
+        "curiosity" if subj_a_send == subj_a else "benefit"
     )
 
     # Email B — Active Seal at 8:15pm ET
     camp_b_url = deploy_campaign(
         html=email_b_html,
         name=title + " | Active Seal | " + metadata.get("suggested_send_date",""),
-        subject="New sleep audio for members: " + title,
+        subject=subj_b_send,
         from_email=from_email,
         from_label="Beezy Beez",
         segment_ids=["UBFUcH"],
     )
+    _record_episode_subject(
+        "episode_active_seal_" + episode_type,
+        "curiosity" if subj_b_send == subj_a else "benefit"
+    )
+
+    # Persist episode to DB for hub rebuild and historical record
+    _camp_a_id = camp_a_url.split("/")[-1] if camp_a_url else None
+    _camp_b_id = camp_b_url.split("/")[-1] if camp_b_url else None
+    try:
+        from db.connection import get_conn
+        with get_conn() as _conn:
+            _conn.execute(
+                """INSERT INTO episodes
+                   (episode_id, title, episode_type, buzzsprout_url, shopify_page_url,
+                    cover_image_url, duration_minutes, suggested_send_date,
+                    klaviyo_campaign_id_a, klaviyo_campaign_id_b)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (episode_id) DO UPDATE SET
+                     klaviyo_campaign_id_a = EXCLUDED.klaviyo_campaign_id_a,
+                     klaviyo_campaign_id_b = EXCLUDED.klaviyo_campaign_id_b,
+                     deployed_at           = NOW()""",
+                (
+                    metadata.get("episode_id"),
+                    title,
+                    episode_type,
+                    metadata.get("buzzsprout_url"),
+                    page_url,
+                    metadata.get("cover_image_url"),
+                    metadata.get("duration_minutes"),
+                    metadata.get("suggested_send_date"),
+                    _camp_a_id,
+                    _camp_b_id,
+                )
+            )
+            _conn.commit()
+        print("[deployer] Episode saved to DB")
+    except Exception as exc:
+        print("[deployer] Episode DB save failed (non-fatal): " + str(exc))
+
+    # Update hub/archive pages with the new episode card
+    try:
+        from workers.hub_updater import add_episode_to_hubs
+        hub_results = add_episode_to_hubs(metadata)
+        print("[deployer] Hub updates: " + str(hub_results))
+    except Exception as exc:
+        print("[deployer] Hub update failed (non-fatal): " + str(exc))
 
     return "Email A: " + camp_a_url + "\nEmail B: " + camp_b_url
 

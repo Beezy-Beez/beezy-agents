@@ -1,6 +1,7 @@
 """Central config — reads from environment variables (Replit Secrets)."""
 import os
 
+KLAVIYO_REVISION      = "2025-10-15"
 DATABASE_URL          = os.environ.get("DATABASE_URL", "")
 KLAVIYO_API_KEY       = os.environ.get("KLAVIYO_API_KEY", "")
 KLAVIYO_FROM_EMAIL    = os.environ.get("KLAVIYO_FROM_EMAIL", "help@trybeezybeez.com")

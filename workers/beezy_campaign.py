@@ -26,10 +26,15 @@ from datetime import datetime, timedelta, timezone
 
 import anthropic
 import httpx
+from config import KLAVIYO_REVISION
+from lib.dryrun import is_dry_run, post_slack_in_dry_run
+from lib.json_extract import loads_lenient
 from workers.validator import validate_campaign
 from workers.auto_schedule import schedule_campaign
 
 MODEL = "claude-sonnet-4-6"
+
+OPEN_METRIC_ID = "WrnXmp"   # "Opened Email" — confirmed May 2026 via /api/metrics/
 
 # A/B testing: segments with estimated list size > 3,000 get a second subject generated.
 LARGE_SEGMENTS = {
@@ -133,9 +138,7 @@ def _generate_page_content(slot: dict, discount_code: str = "") -> dict:
             ("\nDiscount code: " + discount_code if discount_code else "")
         }],
     )
-    raw = msg.content[0].text.strip()
-    s, e = raw.find("{"), raw.rfind("}")
-    return json.loads(raw[s:e+1] if s != -1 else raw)
+    return loads_lenient(msg.content[0].text)
 
 
 def _build_page_html(content: dict, discount_code: str = "", cta_url: str = "") -> str:
@@ -155,6 +158,9 @@ def _build_page_html(content: dict, discount_code: str = "", cta_url: str = "") 
 
 
 def _create_shopify_page(slug: str, title: str, html: str) -> str:
+    if is_dry_run():
+        print(f"[beezy_campaign/DRY RUN] would create Shopify page /pages/{slug}")
+        return "https://trybeezybeez.com/pages/" + slug
     shop  = os.environ.get("SHOPIFY_SHOP_DOMAIN")
     token = os.environ.get("SHOPIFY_ACCESS_TOKEN")
     url   = "https://" + shop + "/admin/api/2025-10/graphql.json"
@@ -190,12 +196,15 @@ def _create_shopify_page(slug: str, title: str, html: str) -> str:
 # ── Step 2: Shopify discount creation ─────────────────────────────────────────
 
 def _create_shopify_discount(slot: dict) -> str:
+    code  = slot.get("discount_code", "").upper().replace(" ", "")
+    if is_dry_run():
+        print(f"[beezy_campaign/DRY RUN] would create Shopify discount {code}")
+        return code
     shop  = os.environ.get("SHOPIFY_SHOP_DOMAIN")
     token = os.environ.get("SHOPIFY_ACCESS_TOKEN")
     url   = "https://" + shop + "/admin/api/2025-10/graphql.json"
     hdrs  = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
 
-    code  = slot.get("discount_code", "").upper().replace(" ", "")
     pct   = float(slot.get("discount_pct", 20)) / 100.0
     now   = datetime.now(timezone.utc)
 
@@ -303,7 +312,7 @@ def _generate_copy(slot: dict, page_url: str = "", discount_code: str = "") -> d
 
     # Incorporate winning subject pattern if one has been learned for this audience
     patterns = _load_subject_patterns()
-    winner = patterns.get(aud_key, {}).get("winning_type")
+    winner = (patterns.get(aud_key) or {}).get("winning_type")
     if winner == "benefit":
         context += "\nSubject line guidance: previous sends show BENEFIT-FOCUSED subjects outperform curiosity for this audience. Lead with the outcome (e.g. 'Sleep through the night, {{ first_name }}')."
     elif winner == "curiosity":
@@ -313,9 +322,7 @@ def _generate_copy(slot: dict, page_url: str = "", discount_code: str = "") -> d
         model=MODEL, max_tokens=1024, system=COPY_SYSTEM,
         messages=[{"role": "user", "content": context}],
     )
-    raw = msg.content[0].text.strip()
-    s, e = raw.find("{"), raw.rfind("}")
-    return json.loads(raw[s:e+1] if s != -1 else raw)
+    return loads_lenient(msg.content[0].text)
 
 
 # ── A/B subject line helpers ──────────────────────────────────────────────────
@@ -371,6 +378,9 @@ def _generate_ab_subject(slot: dict, primary_subject: str) -> str:
 # ── Step 4: Generate image ─────────────────────────────────────────────────────
 
 def _generate_image(prompt: str) -> str:
+    if is_dry_run():
+        print(f"[beezy_campaign/DRY RUN] would generate image: {prompt[:60]}")
+        return "https://trybeezybeez.com/dry-run-placeholder.png"
     try:
         from workers.image_gen import generate_cover
         return generate_cover(prompt).url
@@ -396,6 +406,9 @@ def _generate_image(prompt: str) -> str:
 
 
 def _upload_to_shopify_cdn(image_url: str, alt: str = "") -> str:
+    if is_dry_run():
+        print("[beezy_campaign/DRY RUN] would upload image to Shopify CDN")
+        return image_url
     try:
         from workers.shopify_publisher import upload_image_to_cdn
         return upload_image_to_cdn(image_url, alt)
@@ -484,10 +497,13 @@ def _build_email_html(copy: dict, image_url: str, cta_url: str, discount_code: s
 
 def _klaviyo_headers() -> dict:
     return {"Authorization": "Klaviyo-API-Key " + os.environ.get("KLAVIYO_API_KEY", ""),
-            "revision": "2025-10-15", "Content-Type": "application/json"}
+            "revision": KLAVIYO_REVISION, "Content-Type": "application/json"}
 
 
 def _create_template(html: str, name: str) -> str:
+    if is_dry_run():
+        print(f"[beezy_campaign/DRY RUN] would create Klaviyo template: {name}")
+        return "dry-template"
     resp = httpx.post("https://a.klaviyo.com/api/templates/",
                       headers=_klaviyo_headers(), timeout=30,
                       json={"data": {"type": "template", "attributes":
@@ -497,12 +513,16 @@ def _create_template(html: str, name: str) -> str:
     return resp.json()["data"]["id"]
 
 
-def _create_campaign(slot: dict, copy: dict, segment_id: str) -> tuple[str, str]:
+def _create_campaign(slot: dict, copy: dict, segment_id: str,
+                     excluded_ids: list[str] | None = None) -> tuple[str, str]:
     from_email = os.environ.get("KLAVIYO_FROM_EMAIL", "help@trybeezybeez.com")
     name       = slot.get("audience","?") + " | " + slot.get("topic_angle","")[:35] + " | " + slot.get("date","")
+    if is_dry_run():
+        print(f"[beezy_campaign/DRY RUN] would create Klaviyo campaign: {name}")
+        return "dry-campaign-" + datetime.now(timezone.utc).strftime("%H%M%S"), "dry-msg"
     payload    = {"data": {"type": "campaign", "attributes": {
         "name": name,
-        "audiences": {"included": [segment_id], "excluded": []},
+        "audiences": {"included": [segment_id], "excluded": excluded_ids or []},
         "send_options": {"use_smart_sending": False},
         "tracking_options": {"is_tracking_opens": True, "is_tracking_clicks": True,
                              "add_tracking_params": True, "custom_tracking_params": TRACKING_PARAMS},
@@ -525,6 +545,9 @@ def _create_campaign(slot: dict, copy: dict, segment_id: str) -> tuple[str, str]
 
 
 def _assign_template(message_id: str, template_id: str) -> None:
+    if is_dry_run():
+        print("[beezy_campaign/DRY RUN] would assign template to message")
+        return
     resp = httpx.post("https://a.klaviyo.com/api/campaign-message-assign-template/",
                       headers=_klaviyo_headers(), timeout=30,
                       json={"data": {"type": "campaign-message", "id": message_id,
@@ -566,6 +589,113 @@ def _slack_notify(slot: dict, copy: dict, campaign_id: str, page_url: str, image
 
 # ── Main entry ────────────────────────────────────────────────────────────────
 
+# ── Sniper follow-up: non-opener targeting ───────────────────────────────────
+
+def _find_parent_campaign_id(audience: str) -> str | None:
+    """Return the most recent Klaviyo campaign ID sent to this audience within 7 days."""
+    from db.connection import get_conn
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=7)).isoformat()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT klaviyo_campaign_id FROM calendar_executions "
+                "WHERE audience = %s AND content_type = 'klaviyo_campaign' "
+                "AND slot_date >= %s AND klaviyo_campaign_id IS NOT NULL "
+                "AND status IN ('dispatched','completed') "
+                "ORDER BY slot_date DESC LIMIT 1",
+                (audience, cutoff),
+            )
+            row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _get_campaign_message_id(campaign_id: str) -> str | None:
+    """Return the primary message ID for a Klaviyo campaign."""
+    resp = httpx.get(
+        "https://a.klaviyo.com/api/campaigns/" + campaign_id + "/",
+        headers=_klaviyo_headers(), timeout=15,
+    )
+    if not resp.is_success:
+        print("[beezy_campaign/sniper] Campaign fetch failed: " + resp.text[:200])
+        return None
+    messages = (resp.json().get("data", {})
+                .get("relationships", {})
+                .get("campaign-messages", {})
+                .get("data", []))
+    return messages[0]["id"] if messages else None
+
+
+def _get_opener_profile_ids(message_id: str, lookback_days: int = 14) -> list[str]:
+    """
+    Pull profile IDs who opened the parent campaign via the Events API.
+    Filters by metric (Opened Email) + datetime window; matches $message property client-side.
+    Caps at 50 pages (10,000 events) to avoid runaway pagination.
+    """
+    from datetime import date, timedelta
+    since = (date.today() - timedelta(days=lookback_days)).isoformat() + "T00:00:00Z"
+    opener_ids: set[str] = set()
+    url: str | None = "https://a.klaviyo.com/api/events/"
+    params: dict | None = {
+        "filter": f'equals(metric_id,"{OPEN_METRIC_ID}"),greater-or-equal(datetime,"{since}")',
+        "fields[event]": "properties",
+        "page[size]": "200",
+    }
+    page = 0
+    while url and page < 50:
+        try:
+            resp = httpx.get(url, headers=_klaviyo_headers(),
+                             params=params if page == 0 else None, timeout=30)
+        except httpx.RequestError as exc:
+            print("[beezy_campaign/sniper] Events API request error: " + str(exc))
+            break
+        if not resp.is_success:
+            print("[beezy_campaign/sniper] Events API error: " + str(resp.status_code))
+            break
+        body = resp.json()
+        for event in body.get("data", []):
+            props = event.get("attributes", {}).get("properties", {})
+            if props.get("$message") == message_id:
+                pid = (event.get("relationships", {})
+                       .get("profile", {}).get("data", {}).get("id"))
+                if pid:
+                    opener_ids.add(pid)
+        url = body.get("links", {}).get("next")
+        params = None
+        page += 1
+    return list(opener_ids)
+
+
+def _create_opener_exclusion_list(name: str, profile_ids: list[str]) -> str | None:
+    """
+    Create a Klaviyo list, bulk-add the opener profiles, return the list ID.
+    Returns None if profile_ids is empty.
+    """
+    if not profile_ids:
+        return None
+    headers = _klaviyo_headers()
+    resp = httpx.post(
+        "https://a.klaviyo.com/api/lists/",
+        headers=headers,
+        json={"data": {"type": "list", "attributes": {"name": name}}},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    list_id = resp.json()["data"]["id"]
+    # Add profiles in batches of 1000 (Klaviyo limit)
+    for i in range(0, len(profile_ids), 1000):
+        batch = profile_ids[i:i + 1000]
+        r = httpx.post(
+            "https://a.klaviyo.com/api/lists/" + list_id + "/relationships/profiles/",
+            headers=headers,
+            json={"data": [{"type": "profile", "id": pid} for pid in batch]},
+            timeout=30,
+        )
+        if not r.is_success:
+            print(f"[beezy_campaign/sniper] Warning: batch {i//1000} add failed: {r.status_code}")
+    return list_id
+
+
 def _resolve_segment(audience: str) -> str:
     slug = audience.lower().replace("-","_").replace(" ","_")
     if slug in SEGMENT_IDS:
@@ -580,6 +710,27 @@ def run(slot: dict) -> dict:
     audience   = slot.get("audience","?")
     segment_id = _resolve_segment(audience)
     date_str   = slot.get("date","")
+    excluded_list_id: str | None = None
+
+    # Sniper follow-up: identify non-openers of the parent campaign for targeted exclusion
+    if slot.get("content_type") == "sniper_followup":
+        parent_cid = _find_parent_campaign_id(audience)
+        if parent_cid:
+            slot = dict(slot)  # don't mutate caller's dict
+            slot["parent_send"] = parent_cid  # feed into copy generator
+            print(f"[beezy_campaign] Sniper: parent campaign {parent_cid[:8]}... — pulling openers")
+            msg_id = _get_campaign_message_id(parent_cid)
+            if msg_id:
+                opener_ids = _get_opener_profile_ids(msg_id)
+                print(f"[beezy_campaign] Sniper: {len(opener_ids)} openers to exclude")
+                if opener_ids:
+                    list_name = "Excl openers | " + audience + " | " + date_str
+                    excluded_list_id = _create_opener_exclusion_list(list_name, opener_ids)
+                    print("[beezy_campaign] Sniper: exclusion list " + str(excluded_list_id))
+            else:
+                print("[beezy_campaign] Sniper: could not fetch message_id — sending to full audience")
+        else:
+            print("[beezy_campaign] Sniper: no parent campaign in last 7d — sending to full audience")
 
     # Discount
     discount_code = ""
@@ -670,7 +821,10 @@ def run(slot: dict) -> dict:
     template_id = _create_template(html, tpl_name)
 
     print("[beezy_campaign] Creating Klaviyo campaign...")
-    campaign_id, message_id = _create_campaign(slot, copy, segment_id)
+    campaign_id, message_id = _create_campaign(
+        slot, copy, segment_id,
+        excluded_ids=[excluded_list_id] if excluded_list_id else None,
+    )
 
     if message_id:
         print("[beezy_campaign] Assigning template...")
@@ -688,7 +842,8 @@ def run(slot: dict) -> dict:
 
 def _post_preview(slot: dict, copy: dict, campaign_id: str, image_url: str, ab_subject: str = "") -> None:
     webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-    if not webhook:
+    dry_quiet = is_dry_run() and not post_slack_in_dry_run()
+    if not webhook and not dry_quiet:
         return
     aud = slot.get("audience", "?")
     send_time = slot.get("send_time_est", "TBD")
@@ -711,19 +866,29 @@ def _post_preview(slot: dict, copy: dict, campaign_id: str, image_url: str, ab_s
             f"Klaviyo: https://www.klaviyo.com/campaign/{campaign_id}/wizard"
         )}},
     ]
-    httpx.post(webhook, json={"text": "Campaign preview", "blocks": blocks}, timeout=10)
+    payload = {"text": "Campaign preview", "blocks": blocks}
+    if dry_quiet:
+        print("\n" + "=" * 70)
+        print("[DRY RUN SLACK] Campaign Preview would post:")
+        print(json.dumps(payload, indent=2, default=str)[:6000])
+        print("=" * 70 + "\n")
+        return
+    httpx.post(webhook, json=payload, timeout=10)
 
 
 def _subject_type_to_send(audience: str, has_ab: bool, patterns: dict) -> str:
     """Alternate curiosity/benefit per audience using last_used from subject_patterns."""
     if not has_ab:
         return "curiosity"
-    last = patterns.get(audience, {}).get("last_used", "benefit")  # first time: send curiosity
+    last = (patterns.get(audience) or {}).get("last_used", "benefit")  # first time: send curiosity
     return "benefit" if last == "curiosity" else "curiosity"
 
 
 def _store_pending_schedule(campaign_id: str, message_id: str, slot: dict, copy: dict, image_url: str, page_url: str, ab_subject: str = "") -> None:
     """Store campaign in agent_state as pending_schedule so the cron can auto-schedule it after 60 min."""
+    if is_dry_run():
+        print(f"[beezy_campaign/DRY RUN] would queue {campaign_id} for auto-schedule (skipped)")
+        return
     try:
         from db.connection import get_conn
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -760,7 +925,7 @@ def _patch_message_subject(message_id: str, subject: str) -> None:
     """PATCH the campaign-message subject in Klaviyo. Used to swap A→B subject before scheduling."""
     headers = {
         "Authorization": "Klaviyo-API-Key " + os.environ.get("KLAVIYO_API_KEY", ""),
-        "revision": "2025-10-15",
+        "revision": KLAVIYO_REVISION,
         "Content-Type": "application/json",
     }
     resp = httpx.patch(

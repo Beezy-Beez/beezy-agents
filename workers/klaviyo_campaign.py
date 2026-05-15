@@ -38,8 +38,8 @@ from config import DATABASE_URL
 from lib.email_builder import build_email_html
 from lib.slack import post_draft, notify_failure
 
-KLAVIYO_BASE     = "https://a.klaviyo.com/api"
-KLAVIYO_REVISION = "2025-10-15"
+from config import KLAVIYO_REVISION
+KLAVIYO_BASE = "https://a.klaviyo.com/api"
 
 INCLUDED_LISTS    = ["Sme9Nq", "Xrp3ha", "Y6VSre"]  # SUPER ENGAGED 48hr + ENGAGED 30d + Hive Mind
 EXCLUDED_SEGMENTS = ["XFSxZt"]                       # ALL CUSTOMERS ONLY
@@ -319,6 +319,20 @@ def create_campaign_for_issue(issue_number: int) -> dict:
         ],
         body=f"Klaviyo: {admin_url}\n\nPage: {page_url}",
     )
+
+    # Update hub/archive pages now that the issue page is confirmed live
+    try:
+        from workers.hub_updater import add_issue_to_hubs
+        hub_results = add_issue_to_hubs({
+            "number":           number,
+            "subject_line":     subject_line,
+            "page_dek":         page_dek,
+            "cover_image_url":  cover_image_url,
+            "shopify_page_url": page_url,
+        })
+        print(f"[campaign] Hub updates: {hub_results}")
+    except Exception as exc:
+        print(f"[campaign] Hub update failed (non-fatal): {exc}")
 
     return {
         "campaign_id": campaign_id,

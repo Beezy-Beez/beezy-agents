@@ -231,6 +231,27 @@ CREATE TABLE IF NOT EXISTS seo_topics (
     published_at        TIMESTAMPTZ
 );
 
+-- ── Migration 012 — Episodes table (sleep audio) ─────────────────────────────
+
+CREATE TABLE IF NOT EXISTS episodes (
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    episode_id              TEXT UNIQUE,
+    title                   TEXT NOT NULL,
+    episode_type            TEXT NOT NULL DEFAULT 'sleep_story',
+    buzzsprout_url          TEXT,
+    shopify_page_url        TEXT,
+    cover_image_url         TEXT,
+    duration_minutes        INT,
+    suggested_send_date     DATE,
+    deployed_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    klaviyo_campaign_id_a   TEXT,
+    klaviyo_campaign_id_b   TEXT,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_episodes_deployed_at ON episodes (deployed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_episodes_type ON episodes (episode_type, deployed_at DESC);
+
 -- ── Finalization helper (run in every ingestion pass) ─────────────────────────
 -- UPDATE performance SET is_preliminary = FALSE, finalized_at = NOW()
 -- WHERE is_preliminary = TRUE AND measured_at < NOW() - INTERVAL '72 hours';

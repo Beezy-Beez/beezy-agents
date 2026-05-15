@@ -23,8 +23,8 @@ from decimal import Decimal
 
 import httpx
 
-KLAVIYO_BASE     = "https://a.klaviyo.com/api"
-KLAVIYO_REVISION = "2025-10-15"
+from config import KLAVIYO_REVISION
+KLAVIYO_BASE         = "https://a.klaviyo.com/api"
 CONVERSION_METRIC_ID = "X93gjq"  # Placed Order
 
 # ── Klaviyo segment/list ID → internal audience name ──────────────────────────

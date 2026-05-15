@@ -18,6 +18,9 @@ from datetime import datetime, timezone
 import anthropic
 import httpx
 
+from lib.dryrun import is_dry_run
+from lib.json_extract import loads_lenient
+
 MODEL = "claude-sonnet-4-6"
 
 SYSTEM = (
@@ -58,9 +61,10 @@ def _generate(topic: str, audience: str) -> dict:
             ),
         }],
     )
-    raw = msg.content[0].text.strip()
-    s, e = raw.find("{"), raw.rfind("}")
-    return json.loads(raw[s : e + 1] if s != -1 else raw)
+    # loads_lenient recovers from the raw newlines/quotes a 2,000-word
+    # html_body routinely injects, and raises a clear ValueError (never a
+    # cryptic JSONDecodeError) so the orchestrator marks a clean failure.
+    return loads_lenient(msg.content[0].text)
 
 
 def _shopify_headers() -> dict:
@@ -72,6 +76,10 @@ def _shopify_headers() -> dict:
 
 def _publish(post: dict) -> tuple[str, str]:
     """Publish article to Shopify. Returns (url, article_gid)."""
+    if is_dry_run():
+        slug = post.get("slug", "dry-run-article")
+        print(f"[seo_blog/DRY RUN] would publish article: {post.get('title', '?')}")
+        return f"https://trybeezybeez.com/blogs/news/{slug}", "dry-article"
     shop = os.environ.get("SHOPIFY_SHOP_DOMAIN")
     if not shop:
         raise RuntimeError("SHOPIFY_SHOP_DOMAIN is not set.")

@@ -16,6 +16,13 @@ _webhook_down = False  # suppress repeated DNS-failure spam
 
 def _post(payload: dict[str, Any]) -> bool:
     global _webhook_down
+    from lib.dryrun import is_dry_run, post_slack_in_dry_run
+    if is_dry_run() and not post_slack_in_dry_run():
+        print("\n" + "=" * 70)
+        print("[DRY RUN SLACK] would post:")
+        print(json.dumps(payload, indent=2, default=str)[:6000])
+        print("=" * 70 + "\n")
+        return True
     if not SLACK_WEBHOOK_URL:
         return False
     try:

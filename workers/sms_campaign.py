@@ -23,6 +23,7 @@ from datetime import date
 
 import anthropic
 import httpx
+from config import KLAVIYO_REVISION
 
 MODEL = "claude-sonnet-4-6"
 
@@ -103,7 +104,7 @@ def _generate_sms_copy(slot: dict, cta_url: str) -> dict:
 def _klaviyo_headers() -> dict:
     return {
         "Authorization": "Klaviyo-API-Key " + os.environ.get("KLAVIYO_API_KEY", ""),
-        "revision": "2025-10-15",
+        "revision": KLAVIYO_REVISION,
         "Content-Type": "application/json",
     }
 

@@ -340,6 +340,81 @@ def run_biweekly() -> str:
         return report
 
 
+# ── Burn list auto-maintenance ────────────────────────────────────────────────
+
+RPR_BURN_THRESHOLD = 0.05   # avg_rpr below this → candidate for burn list
+RPR_BURN_MIN_SENDS = 5      # need at least this many sends before burning
+
+
+def _auto_update_burn_list(conn, rpr_table: dict, month_label: str) -> None:
+    """Add underperforming audiences to burn list; remove recovering ones.
+
+    An audience is ADDED if: avg_rpr < $0.05 AND sends >= 5.
+    An audience is REMOVED from the list if it now has avg_rpr >= $0.10 (recovered).
+    Writes a Slack note about any changes made.
+    """
+    from lib.slack import post_draft
+    now_str = __import__("datetime").date.today().isoformat()
+
+    row = conn.execute(
+        "SELECT value FROM agent_state WHERE key = 'burned_audiences' LIMIT 1"
+    ).fetchone()
+    data: dict = json.loads(row[0]) if row else {"audiences": []}
+    burned: list[str] = [
+        a.lower().replace("-", "_").replace(" ", "_")
+        for a in (data.get("audiences") or [])
+    ]
+
+    newly_burned: list[str] = []
+    recovered: list[str] = []
+
+    for audience, metrics in rpr_table.items():
+        aud_key = audience.lower().replace("-", "_").replace(" ", "_")
+        rpr   = metrics.get("avg_rpr", 0)
+        sends = metrics.get("sends", 0)
+
+        if rpr < RPR_BURN_THRESHOLD and sends >= RPR_BURN_MIN_SENDS:
+            if aud_key not in burned:
+                burned.append(aud_key)
+                newly_burned.append(aud_key)
+        elif rpr >= 0.10 and aud_key in burned:
+            burned.remove(aud_key)
+            recovered.append(aud_key)
+
+    if newly_burned or recovered:
+        data["audiences"] = burned
+        data["updated_at"] = now_str
+        conn.execute(
+            "INSERT INTO agent_state (key, value, updated_at) VALUES ('burned_audiences', %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            (json.dumps(data),)
+        )
+        conn.commit()
+
+        lines = [f"*Burn list auto-update — {month_label} retro*", ""]
+        if newly_burned:
+            lines.append(f"🔥 *Added to burn list* (RPR < ${RPR_BURN_THRESHOLD:.2f}, ≥{RPR_BURN_MIN_SENDS} sends):")
+            for a in newly_burned:
+                rpr = rpr_table.get(a, {}).get("avg_rpr", 0)
+                lines.append(f"  • {a} — avg RPR ${rpr:.4f}")
+        if recovered:
+            lines.append(f"✅ *Removed from burn list* (RPR recovered to ≥$0.10):")
+            for a in recovered:
+                rpr = rpr_table.get(a, {}).get("avg_rpr", 0)
+                lines.append(f"  • {a} — avg RPR ${rpr:.4f}")
+        lines.append("")
+        lines.append(f"_Total burned: {len(burned)} audiences. Use `burn list` in Slack to view._")
+
+        post_draft(
+            title=f"🔥 Burn list updated — {month_label}",
+            summary_lines=lines,
+            body="",
+        )
+        print(f"[learning_loop] Burn list: +{len(newly_burned)} -({len(recovered)}), total={len(burned)}")
+    else:
+        print("[learning_loop] Burn list: no changes this month")
+
+
 # ── Monthly retrospective (1st at 9am) ────────────────────────────────────────
 
 def run_monthly() -> str:
@@ -401,6 +476,10 @@ def run_monthly() -> str:
             }),)
         )
         conn.commit()
+
+        # Auto-update burn list: any audience with avg_rpr < $0.05 AND ≥5 sends
+        # is added to the burn list so validator R5 blocks future sends
+        _auto_update_burn_list(conn, rpr_table, last_month_start.strftime("%Y-%m"))
 
         pct = totals["total_revenue"] / MONTHLY_GOAL * 100
         lines = [

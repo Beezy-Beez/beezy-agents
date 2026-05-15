@@ -25,6 +25,7 @@ import os
 from datetime import date, timedelta
 
 import httpx
+from config import KLAVIYO_REVISION
 
 CONVERSION_METRIC_ID = "X93gjq"
 
@@ -62,7 +63,7 @@ FLOW_TYPE_MAP = {
 def _klaviyo_headers() -> dict:
     return {
         "Authorization": "Klaviyo-API-Key " + os.environ.get("KLAVIYO_API_KEY", ""),
-        "revision": "2025-10-15",
+        "revision": KLAVIYO_REVISION,
         "Content-Type": "application/json",
     }
 
@@ -317,6 +318,14 @@ def run_flow_check() -> str:
     except Exception as e:
         print(f"[flow_monitor] DB save failed: {e}")
 
+    # Auto-fix: for zero-revenue critical flows with >50 recipients, generate copy + Slack button
+    for a in critical:
+        if a.get("revenue") == 0 and a.get("recipients", 0) > 50:
+            try:
+                fix_flow(a)
+            except Exception as fe:
+                print(f"[flow_monitor] fix_flow failed for {a.get('name')}: {fe}")
+
     print(f"[flow_monitor] Done. {len(critical)} critical, {len(warns)} warnings.")
     return report
 
@@ -387,7 +396,7 @@ def _build_flow_email_html(copy: dict, flow_name: str) -> str:
   </div>
   <p style="font-size:11px;color:#999;text-align:center;margin-top:24px;">
     © Beezy Beez Honey · {{{{ organization.address }}}}
-    · <a href="{{ unsubscribe_url }}" style="color:#999;">Unsubscribe</a>
+    · {{% unsubscribe 'Unsubscribe' %}}
   </p>
 </div></body></html>"""
 

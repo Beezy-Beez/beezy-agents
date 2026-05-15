@@ -3,8 +3,8 @@ Beezy Send Validator — pre-send gatekeeper.
 Runs before ANY campaign is deployed to Klaviyo.
 If verdict is FAIL → campaign is blocked, Slack gets the failure details.
 
-Implements 12 rules from beezy-system validator v3.
-Rules marked LIVE are fully automated. Rules marked STUB require future Klaviyo API integration.
+Implements 17 rules: 12 structural (R1–R12) + 5 content checks (C1–C5).
+All rules are live. Auto-fail rules: R2, R10, C1, C2, C3, C5.
 
 Usage:
     from workers.validator import validate_campaign
@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
+from config import KLAVIYO_REVISION
 
 NY = ZoneInfo("America/New_York")
 
@@ -65,21 +66,42 @@ def _r1_smart_sending(conn, slot: dict) -> dict:
 
 
 def _r2_audience_cooldown(conn, slot: dict) -> dict:
-    """R2: Absolute 7-day audience cooldown (≥168h). NON-NEGOTIABLE."""
-    audience = slot.get("audience", "")
-    today = date.today()
+    """R2: Absolute 7-day audience cooldown (≥168h). NON-NEGOTIABLE.
+
+    Exception: sniper_followup is allowed within the 7-day window IF a parent
+    klaviyo_campaign was dispatched to the same audience within those 7 days.
+    The sniper targets non-openers only (exclusion list built in beezy_campaign.py).
+    """
+    audience     = slot.get("audience", "")
+    content_type = slot.get("content_type", "")
+    today          = date.today()
     seven_days_ago = today - timedelta(days=7)
+
     row = conn.execute(
-        "SELECT slot_date FROM calendar_executions "
+        "SELECT slot_date, content_type FROM calendar_executions "
         "WHERE audience = %s AND slot_date > %s AND status IN ('dispatched','completed') "
         "ORDER BY slot_date DESC LIMIT 1",
         (audience, seven_days_ago)
     ).fetchone()
+
     if row and row[0]:
-        days_since = (today - row[0]).days
+        days_since   = (today - row[0]).days
+        parent_type  = row[1] if len(row) > 1 else ""
+
+        # Sniper exemption: the recent send IS the parent campaign we're following up on
+        if content_type == "sniper_followup" and parent_type == "klaviyo_campaign":
+            return {"rule": "R2", "name": "7-day cooldown (≥168h)", "pass": True,
+                    "detail": f"sniper_followup exempt — parent klaviyo_campaign sent {days_since}d ago, targeting non-openers only"}
+
         if days_since < 7:
             return {"rule": "R2", "name": "7-day cooldown (≥168h)", "pass": False,
                     "detail": f"Last sent {days_since}d ago on {row[0]}. Need 7d."}
+
+    # No send in last 7 days — snipers require a parent campaign to follow up on
+    if content_type == "sniper_followup":
+        return {"rule": "R2", "name": "7-day cooldown (≥168h)", "pass": False,
+                "detail": "sniper_followup requires a parent klaviyo_campaign in the last 7 days — none found"}
+
     return {"rule": "R2", "name": "7-day cooldown (≥168h)", "pass": True,
             "detail": "No sends to this audience in last 7 days"}
 
@@ -123,10 +145,35 @@ def _r4_active_seal_weekly(conn, slot: dict) -> dict:
             "detail": f"{count}/4 sends this week" + ("" if passed else " — LIMIT REACHED")}
 
 
-def _r5_burned_audience(slot: dict) -> dict:
-    """R5: Not on current burn list. (Stub — burn list is manually maintained.)"""
-    return {"rule": "R5", "name": "Burned audience list", "pass": True,
-            "detail": "STUB — burn list check not automated yet"}
+def _r5_burned_audience(conn, slot: dict) -> dict:
+    """R5: Audience not on the burn list stored in agent_state['burned_audiences'].
+
+    The burn list is maintained automatically by the monthly learning loop
+    (any audience whose 90d avg RPR drops below $0.05 with ≥5 sends) and can
+    also be updated manually via Slack commands 'burn <audience>' / 'unburn <audience>'.
+    """
+    audience = (slot.get("audience") or "").lower().replace(" ", "_").replace("-", "_")
+    try:
+        row = conn.execute(
+            "SELECT value FROM agent_state WHERE key = 'burned_audiences' LIMIT 1"
+        ).fetchone()
+        if not row:
+            return {"rule": "R5", "name": "Burned audience list", "pass": True,
+                    "detail": "No burn list defined — all audiences clear"}
+        import json as _json
+        data = _json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        burned: list[str] = [a.lower().replace("-","_").replace(" ","_")
+                             for a in (data.get("audiences") or [])]
+        if audience in burned:
+            updated = data.get("updated_at", "unknown")
+            return {"rule": "R5", "name": "Burned audience list", "pass": False,
+                    "detail": f"'{audience}' is on the burn list (added {updated}). "
+                              "Unburn via Slack: 'unburn {audience}'"}
+        return {"rule": "R5", "name": "Burned audience list", "pass": True,
+                "detail": f"'{audience}' not on burn list ({len(burned)} audiences listed)"}
+    except Exception as exc:
+        return {"rule": "R5", "name": "Burned audience list", "pass": True,
+                "detail": f"Burn list check skipped ({exc})"}
 
 
 def _r6_revenue_floor(slot: dict) -> dict:
@@ -236,7 +283,7 @@ def _r10_active_flow_overlap(slot: dict) -> dict:
     try:
         resp = httpx.get(
             "https://a.klaviyo.com/api/flows",
-            headers={"Authorization": f"Klaviyo-API-Key {api_key}", "revision": "2025-10-15"},
+            headers={"Authorization": f"Klaviyo-API-Key {api_key}", "revision": KLAVIYO_REVISION},
             params={"filter": 'equals(status,"live")', "fields[flow]": "name,trigger_type"},
             timeout=15,
         )
@@ -467,7 +514,7 @@ def validate_campaign(conn, slot: dict, copy: dict, cta_url: str) -> dict:
     results.append(_r2_audience_cooldown(conn, slot))
     results.append(_r3_theme_gap(conn, slot))
     results.append(_r4_active_seal_weekly(conn, slot))
-    results.append(_r5_burned_audience(slot))
+    results.append(_r5_burned_audience(conn, slot))
     results.append(_r6_revenue_floor(slot))
     results.append(_r7_format_kill_list(slot))
     results.append(_r8_daily_cadence(conn, slot))

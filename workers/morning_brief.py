@@ -84,6 +84,39 @@ def _pacing_data() -> dict:
     return {}
 
 
+def _pacing_state() -> dict | None:
+    """Read the latest pacing_state row + active goal target.
+
+    This is the SAME source the 7:30am pacing brain digest uses (Shopify
+    order revenue vs target). The morning brief MUST report the same numbers
+    — comparing Klaviyo-attributed revenue against the store goal made pacing
+    look ~$34K worse than reality (CLAUDE.md §0).
+    """
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT g.target_value, ps.period_to_date_value, ps.target_to_date_value, "
+                "       ps.gap_pct, ps.required_daily_rate, ps.days_remaining, ps.measured_at "
+                "FROM pacing_state ps JOIN goals g ON g.id = ps.goal_id "
+                "WHERE g.status = 'active' "
+                "ORDER BY ps.measured_at DESC LIMIT 1"
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "target": float(row[0] or 0),
+            "ptd": float(row[1] or 0),
+            "ttd": float(row[2] or 0),
+            "gap_pct": float(row[3] or 0),
+            "required_daily": float(row[4] or 0),
+            "days_remaining": int(row[5] or 1),
+            "measured_at": row[6],
+        }
+    except Exception:
+        return None
+
+
 def _today_executions() -> list:
     try:
         from db.connection import get_conn
@@ -172,20 +205,38 @@ def run_morning_brief() -> None:
     days_elapsed = today.day
     days_left = max(last_day - today.day, 1)
 
-    cache = _pacing_data()
-    rev = float(cache.get("campaign_rev", 0)) + float(cache.get("flow_rev", 0))
-    pct = rev / MONTHLY_GOAL * 100
-    daily_actual = rev / days_elapsed if days_elapsed else 0
-    daily_needed = max(MONTHLY_GOAL - rev, 0) / days_left
-    linear_expected = MONTHLY_GOAL * days_elapsed / (days_elapsed + days_left)
-    gap = rev - linear_expected
-
-    if gap > linear_expected * 0.05:
-        pace_line = f"📈 *Pace:* AHEAD by ${abs(gap):,.0f} — looking good"
-    elif gap > -(linear_expected * 0.05):
-        pace_line = f"📈 *Pace:* ON TRACK — ${daily_needed:,.0f}/day needed"
+    # Primary source: pacing_state (same Shopify-order-revenue basis as the
+    # 7:30am pacing brain). Both posts MUST agree.
+    ps = _pacing_state()
+    if ps:
+        goal = ps["target"] or MONTHLY_GOAL
+        rev = ps["ptd"]
+        pct = rev / goal * 100 if goal else 0
+        linear_expected = ps["ttd"]
+        gap = rev - linear_expected
+        daily_needed = ps["required_daily"]
+        threshold = max(linear_expected * 0.05, 1)
+        if gap > threshold:
+            pace_line = f"📈 *Pace:* AHEAD by ${abs(gap):,.0f} — looking good"
+        elif gap > -threshold:
+            pace_line = f"📈 *Pace:* ON TRACK — ${daily_needed:,.0f}/day needed"
+        else:
+            pace_line = f"📉 *Pace:* BEHIND by ${abs(gap):,.0f} — need ${daily_needed:,.0f}/day to recover"
     else:
-        pace_line = f"📉 *Pace:* BEHIND by ${abs(gap):,.0f} — need ${daily_needed:,.0f}/day to recover"
+        # Fallback only if pacing brain hasn't run yet today — flagged as preliminary.
+        cache = _pacing_data()
+        goal = MONTHLY_GOAL
+        rev = float(cache.get("campaign_rev", 0)) + float(cache.get("flow_rev", 0))
+        pct = rev / MONTHLY_GOAL * 100
+        daily_needed = max(MONTHLY_GOAL - rev, 0) / days_left
+        linear_expected = MONTHLY_GOAL * days_elapsed / (days_elapsed + days_left)
+        gap = rev - linear_expected
+        if gap > linear_expected * 0.05:
+            pace_line = f"📈 *Pace:* AHEAD by ${abs(gap):,.0f} (preliminary — pacing brain pending)"
+        elif gap > -(linear_expected * 0.05):
+            pace_line = f"📈 *Pace:* ON TRACK — ${daily_needed:,.0f}/day (preliminary)"
+        else:
+            pace_line = f"📉 *Pace:* BEHIND by ${abs(gap):,.0f} — need ${daily_needed:,.0f}/day (preliminary)"
 
     # Today's sends from decisions (planned) merged with executions (actual)
     planned = _today_planned_slots()
@@ -196,7 +247,8 @@ def run_morning_brief() -> None:
     for s in planned:
         ct  = s.get("content_type", "?")
         aud = s.get("audience", "?")
-        tm  = _fmt_time(s.get("send_time_est", "?"))
+        raw_tm = (s.get("send_time_est") or "").strip()
+        tm  = _fmt_time(raw_tm) if raw_tm else ""
         rv  = float(s.get("revenue_estimate", 0) or 0)
         ex  = exec_map.get((ct, aud))
         emoji    = _CONTENT_EMOJI.get(ct, "•")
@@ -204,7 +256,8 @@ def run_morning_brief() -> None:
         aud_nice = _AUDIENCE_LABEL.get(aud, aud.replace("_", " ").title())
         done_str = " ✅" if ex and ex["s"] in ("dispatched", "completed") else ""
         rv_str   = f" — est. ${rv:,.0f}" if rv else ""
-        send_lines.append(f"  {emoji} {label} → {aud_nice} at {tm}{rv_str}{done_str}")
+        tm_str   = f" at {tm}" if tm else ""
+        send_lines.append(f"  {emoji} {label} → {aud_nice}{tm_str}{rv_str}{done_str}")
 
     if not send_lines:
         # Check executions in case orchestrator already ran
@@ -234,7 +287,7 @@ def run_morning_brief() -> None:
     lines = [
         f"🌅 *Good morning. Here's today.*",
         f"",
-        f"💰 *Revenue MTD:* ${rev:,.0f} / ${MONTHLY_GOAL:,} ({pct:.1f}%)",
+        f"💰 *Revenue MTD:* ${rev:,.0f} / ${goal:,.0f} ({pct:.1f}%)",
         pace_line,
         f"",
     ]

@@ -61,66 +61,117 @@ FALLBACK_LIST_SIZE = {
 }
 
 
+def _load_strategies_rpr(conn) -> dict[str, float]:
+    """Read the most recent monthly RPR update from the strategies table.
+
+    The learning loop writes here every 1st of the month with component='learning_loop'
+    and strategy_text containing {"type": "monthly_rpr_update", "rpr_by_audience": {...}}.
+    Returns dict[audience -> avg_rpr].  Empty dict if no record exists yet.
+    """
+    import json as _json
+    try:
+        row = conn.execute(
+            """SELECT strategy_text FROM strategies
+               WHERE component = 'learning_loop' AND is_active = true
+               ORDER BY created_at DESC LIMIT 1"""
+        ).fetchone()
+        if not row:
+            return {}
+        data = _json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        raw = data.get("rpr_by_audience") or {}
+        return {aud: float(v["avg_rpr"]) for aud, v in raw.items() if "avg_rpr" in v}
+    except Exception as exc:
+        print(f"[calendar_live_data] strategies RPR load failed: {exc}")
+        return {}
+
+
 def get_performance_by_segment(conn) -> dict[str, dict]:
     """
-    Pull actual RPR and avg revenue per send by audience from performance table.
+    Pull actual RPR and avg revenue per send by audience.
+
+    Priority order:
+      1. calendar_executions + performance join (last 90d, finalized rows) — most current
+      2. learning_loop strategies table (last monthly retro RPR update)  — one month old
+      3. FALLBACK_RPR / FALLBACK_LIST_SIZE hardcoded constants           — May 2026 baseline
+
     Returns dict: audience_label -> {rpr, avg_revenue, list_size, sends, source}
     """
     cutoff = (date.today() - timedelta(days=90)).isoformat()
     result: dict[str, dict] = {}
 
+    # ── Source 1: calendar_executions joined to performance ──────────────────
     try:
         with conn.cursor() as cur:
-            # Try to get campaign-level performance grouped by audience
             cur.execute("""
                 SELECT
                     audience,
-                    COUNT(*)                          AS sends,
-                    AVG(revenue)                      AS avg_revenue,
-                    AVG(revenue / NULLIF(recipients,0)) AS avg_rpr,
-                    AVG(recipients)                   AS avg_recipients
-                FROM (
-                    SELECT
-                        ce.audience,
-                        COALESCE(p.value, 0)          AS revenue,
-                        COALESCE(ce.recipients, 0)    AS recipients
-                    FROM calendar_executions ce
-                    LEFT JOIN performance p
-                      ON p.source_id = ce.klaviyo_campaign_id
-                     AND p.metric_name = 'revenue'
-                     AND p.is_preliminary = false
-                    WHERE ce.executed_at >= %s
-                      AND ce.status = 'completed'
-                ) sub
+                    COUNT(*)                                AS sends,
+                    AVG(COALESCE(actual_revenue, 0))        AS avg_revenue,
+                    AVG(COALESCE(actual_rpr, 0))            AS avg_rpr,
+                    AVG(COALESCE(recipients, 0))            AS avg_recipients
+                FROM calendar_executions
+                WHERE executed_at >= %s
+                  AND status IN ('dispatched','completed')
+                  AND is_preliminary = false
+                  AND actual_revenue IS NOT NULL
                 GROUP BY audience
                 HAVING COUNT(*) >= 1
             """, (cutoff,))
             rows = cur.fetchall()
 
-        for row in rows:
-            audience, sends, avg_rev, avg_rpr, avg_recip = row
-            audience_key = audience.lower().replace("-","_").replace(" ","_")
-            result[audience_key] = {
-                "rpr":        float(avg_rpr or 0),
-                "avg_revenue": float(avg_rev or 0),
-                "list_size":  int(avg_recip or FALLBACK_LIST_SIZE.get(audience_key, 4000)),
-                "sends":      int(sends),
-                "source":     "actual",
-            }
-    except Exception as e:
-        print("[calendar_live_data] Performance query failed: " + str(e))
+        for audience, sends, avg_rev, avg_rpr, avg_recip in rows:
+            key = audience.lower().replace("-", "_").replace(" ", "_")
+            if float(avg_rpr or 0) > 0:          # skip zero-revenue rows
+                result[key] = {
+                    "rpr":         float(avg_rpr),
+                    "avg_revenue": float(avg_rev),
+                    "list_size":   int(avg_recip or FALLBACK_LIST_SIZE.get(key, 4000)),
+                    "sends":       int(sends),
+                    "source":      "actual",
+                }
+        if result:
+            print(f"[calendar_live_data] Live data: {len(result)} audiences from executions table")
+    except Exception as exc:
+        print(f"[calendar_live_data] Executions query failed: {exc}")
 
-    # Fill gaps with fallbacks
+    # ── Source 2: strategies table RPR (monthly retro) ───────────────────────
+    strategies_rpr = _load_strategies_rpr(conn)
+    for aud, rpr in strategies_rpr.items():
+        if aud not in result and rpr > 0:
+            size = FALLBACK_LIST_SIZE.get(aud, 4000)
+            result[aud] = {
+                "rpr":         rpr,
+                "avg_revenue": round(rpr * size, 0),
+                "list_size":   size,
+                "sends":       0,
+                "source":      "strategies",
+            }
+    if strategies_rpr:
+        strategies_filled = sum(1 for v in result.values() if v["source"] == "strategies")
+        if strategies_filled:
+            print(f"[calendar_live_data] Strategies table: {strategies_filled} audiences filled")
+
+    # ── Source 3: hardcoded fallbacks for anything still missing ─────────────
+    fallback_count = 0
     for label, rpr in FALLBACK_RPR.items():
         if label not in result:
             size = FALLBACK_LIST_SIZE.get(label, 4000)
             result[label] = {
-                "rpr":        rpr,
+                "rpr":         rpr,
                 "avg_revenue": round(rpr * size, 0),
-                "list_size":  size,
-                "sends":      0,
-                "source":     "fallback",
+                "list_size":   size,
+                "sends":       0,
+                "source":      "fallback",
             }
+            fallback_count += 1
+
+    if fallback_count:
+        total = len(result)
+        pct   = int(100 * fallback_count / total)
+        print(
+            f"[calendar_live_data] WARNING: {fallback_count}/{total} audiences ({pct}%) "
+            "using hardcoded May 2026 fallbacks — performance table may be sparse"
+        )
 
     return result
 
@@ -171,12 +222,31 @@ def build_performance_context_text(perf: dict, pacing: dict) -> str:
             f"   heavily. You need ${pacing['required_daily']:,.0f}/day average.",
         ]
 
+    actual     = {k: v for k, v in perf.items() if v["source"] == "actual"}
+    strategies = {k: v for k, v in perf.items() if v["source"] == "strategies"}
+    fallback   = {k: v for k, v in perf.items() if v["source"] == "fallback"}
+
+    # Surface data-quality warning when live data is sparse
+    total = len(perf)
+    n_live = len(actual) + len(strategies)
+    if total > 0 and n_live == 0:
+        lines += [
+            "",
+            "⚠️  DATA QUALITY WARNING: No recent campaign performance data available.",
+            "   All numbers below are hardcoded baseline estimates (May 2026).",
+            "   Treat revenue_estimate values as rough guides only — do NOT over-optimize.",
+        ]
+    elif total > 0 and len(fallback) > total // 2:
+        lines += [
+            "",
+            f"⚠️  DATA NOTE: {len(fallback)}/{total} audiences using baseline estimates "
+            "(no recent finalized sends). Live data rows marked [ACTUAL] are reliable.",
+        ]
+
     lines += ["", "HISTORICAL PERFORMANCE BY AUDIENCE (last 90 days):"]
-    actual   = {k: v for k, v in perf.items() if v["source"] == "actual"}
-    fallback = {k: v for k, v in perf.items() if v["source"] == "fallback"}
 
     if actual:
-        lines.append("  [ACTUAL data — use these numbers directly]")
+        lines.append("  [ACTUAL — 90d calendar_executions, finalized attribution]")
         for aud, d in sorted(actual.items(), key=lambda x: -x[1]["avg_revenue"]):
             lines.append(
                 f"  {aud:<22} RPR ${d['rpr']:.3f}  "
@@ -185,8 +255,17 @@ def build_performance_context_text(perf: dict, pacing: dict) -> str:
                 f"({d['sends']} sends)"
             )
 
+    if strategies:
+        lines.append("  [STRATEGIES — from last monthly retro, ~30 days old]")
+        for aud, d in sorted(strategies.items(), key=lambda x: -x[1]["avg_revenue"]):
+            lines.append(
+                f"  {aud:<22} RPR ${d['rpr']:.3f}  "
+                f"list ~{d['list_size']:,}  "
+                f"≈ ${d['avg_revenue']:,.0f}/send  (monthly retro)"
+            )
+
     if fallback:
-        lines.append("  [ESTIMATED (no recent data) — use conservatively]")
+        lines.append("  [ESTIMATED — May 2026 baseline, use conservatively]")
         for aud, d in sorted(fallback.items(), key=lambda x: -x[1]["avg_revenue"]):
             if d["avg_revenue"] > 0:
                 lines.append(

@@ -13,6 +13,7 @@ from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
+from config import KLAVIYO_REVISION
 
 NY = ZoneInfo("America/New_York")
 
@@ -30,7 +31,7 @@ DEFAULT_SEND_TIMES = {
 def _klaviyo_headers() -> dict:
     return {
         "Authorization": "Klaviyo-API-Key " + os.environ.get("KLAVIYO_API_KEY", ""),
-        "revision": "2025-10-15",
+        "revision": KLAVIYO_REVISION,
         "Content-Type": "application/json",
     }
 
