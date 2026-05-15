@@ -978,9 +978,10 @@ Pricing reference: Sonnet $3/$15 per 1M, Opus 4.7 $15/$75, Haiku $1/$5 (input/ou
 ### Not built / known gaps
 - **Next.js dashboard:** deferred; `app/dashboard.py` is the FastAPI HTML dashboard (fully functional).
 - **Integration tests:** unit tests exist (validator, pacing, ingestion). No end-to-end tests for the full campaign dispatch chain.
+- **`sniper_followup`:** blocked by R2 because it uses full audience (non-opener segmentation not implemented). See "Known gaps" above.
 
 ### Recently completed (session May 2026)
-- **Tests:** 42 tests across `tests/test_pacing.py` and `tests/test_validator.py` — all 17 validator rules + pacing math covered.
+- **Tests:** 43 tests across `tests/test_pacing.py` and `tests/test_validator.py` — all 17 validator rules + pacing math covered.
 - **A/B subject testing:** `workers/beezy_campaign.py` — curiosity vs benefit subjects for large segments (>3k); patterns accumulated in `agent_state['subject_patterns']`; winner wired into calendar context.
 - **Revenue backfill:** `workers/revenue_backfill.py` — updates `actual_revenue`, `actual_rpr`, `is_preliminary=false` after 72h window; feeds subject_patterns learning loop.
 - **Dashboard data:** `app/dashboard.py` — all sections now show live data: campaign/flow revenue from performance table fallback, top performers from Klaviyo, audience RPR from segment_ids mapping.
@@ -990,6 +991,16 @@ Pricing reference: Sonnet $3/$15 per 1M, Opus 4.7 $15/$75, Haiku $1/$5 (input/ou
 - **`db/schema.sql`:** unified schema file for fresh DB setup (replaces running 11 migrations manually).
 - **Root cleanup:** 70 orphaned install/patch scripts deleted from workspace root.
 - **Human-readable Slack messages:** `pacing/weekly_brief.py` and `workers/morning_brief.py` — slot lines now show "Email → Lapsed 30d customers at 2pm  ·  est. $967" instead of raw slugs; `_fmt_time()` converts 24h to 12h am/pm; `CONTENT_LABEL`/`AUDIENCE_LABEL` dicts map all internal names to owner-friendly labels.
+- **Concurrent orchestrator guard:** `pacing/orchestrator.run_daily()` — `pg_try_advisory_lock(7777777777)` at entry; rapid-fire `deploy campaigns` Slack triggers no longer create phantom `calendar_executions` rows. Cleaned 28 orphan phantom rows from May 15.
+- **Cron catch-up logic:** `app/main.py` — pacing brain (7:30am) and orchestrator (8:00am) now have catch-up windows (7:30–8:29 and 8:00–9:00 ET) backed by `agent_state` ran-today sentinels. Replit Autoscale scale-to-zero no longer silently drops daily jobs.
+- **Duplicate pacing_state dedup:** `pacing/cron._insert_pacing_state()` — checks for existing today's row before inserting; prevents duplicate pacing snapshots from rapid re-runs or catch-up.
+- **BOOST topic from calendar:** `pacing/orchestrator._boost_candidate_slot()` — looks up next unexecuted calendar slot for the audience before falling back to hardcoded topic angle; BOOST emails now match planned calendar narrative.
+- **Approval nudge:** `pacing/weekly_brief.run_approval_nudge()` — Monday 9:30am ET: posts urgent Slack reminder if this week's plan is still not approved; no-op if already approved.
+- **R2 parity fix:** `pacing/orchestrator._audience_in_cooldown()` mirrors validator R2 exactly — exclusive 7-day boundary, only dispatched/completed rows count. Prevents orchestrator BOOST from bypassing R2 rules the validator enforces.
+
+### Known gaps / deferred
+- **`sniper_followup` R2:** R2 correctly blocks snipers because they use the full audience segment (non-opener targeting is not implemented at Klaviyo segment level). Fix requires creating a dynamic "non-openers" Klaviyo segment per campaign — deferred.
+- **End-to-end integration tests:** unit tests exist (validator, pacing, ingestion). No end-to-end tests for the full campaign dispatch chain.
 
 ---
 
