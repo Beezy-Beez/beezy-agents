@@ -1,0 +1,51 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300..700;1,9..40,300..700&family=DM+Serif+Display&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-dm-sans: "DM Sans", sans-serif;
+  --font-dm-serif: "DM Serif Display", serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  font-family: var(--font-dm-sans);
+  background: #faf6ee;
+  color: #2c2417;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Skeleton shimmer */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #f0ece4 25%, #e8dcc8 50%, #f0ece4 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+  border-radius: 6px;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #e8dcc8; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #d4a847; }
+
+/* Table row left-border color helper */
+.ct-border-email        { border-left: 3px solid #1a73e8; }
+.ct-border-sniper       { border-left: 3px solid #1558b0; }
+.ct-border-hive         { border-left: 3px solid #7b2d8b; }
+.ct-border-seo          { border-left: 3px solid #1e7e34; }
+.ct-border-audio        { border-left: 3px solid #0e7c7b; }
+.ct-border-sms          { border-left: 3px solid #e07b00; }
+.ct-border-flow         { border-left: 3px solid #888; }
+.ct-border-not-sent     { border-left: 3px solid #ddd; }
