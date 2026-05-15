@@ -114,10 +114,10 @@ class TestOrchestratorEndToEnd:
         """Calendar plan → run_daily → calendar_executions row created."""
         aud = "e2e_happy_" + uuid.uuid4().hex[:6]
         _insert_approval(conn)
-        _insert_plan(conn, [_mk_slot(aud)])
-        # NO conn.commit() — get_conn is patched to this same conn and run_daily
-        # is driven manually below, so committed data is never needed. Committing
-        # wrote phantom calendar_plan rows into the production DB every run.
+        decision_id = _insert_plan(conn, [_mk_slot(aud)])
+        # _mark() below calls conn.commit() which also commits the data inserted
+        # by _insert_plan() and _insert_approval(). The try/finally cleans up
+        # everything that was committed to production by this test.
 
         handler_called = []
 
@@ -125,34 +125,46 @@ class TestOrchestratorEndToEnd:
             handler_called.append(slot["audience"])
             return f"klaviyo_draft:CAMP_{uuid.uuid4().hex[:6]}"
 
-        with patch("pacing.orchestrator.get_conn", _mock_orchestrator_external(conn)), \
-             patch("pacing.orchestrator.post_draft"), \
-             patch("pacing.orchestrator.HANDLERS", {"klaviyo_campaign": _fake_handler}), \
-             patch("pacing.orchestrator.pg_try_advisory_lock", return_value=True, create=True):
+        try:
+            with patch("pacing.orchestrator.get_conn", _mock_orchestrator_external(conn)), \
+                 patch("pacing.orchestrator.post_draft"), \
+                 patch("pacing.orchestrator.HANDLERS", {"klaviyo_campaign": _fake_handler}), \
+                 patch("pacing.orchestrator.pg_try_advisory_lock", return_value=True, create=True):
 
-            from pacing.orchestrator import (
-                _latest_calendar, _todays_slots, _is_approved,
-                _already_ran, _mark, _today_priority_mode,
+                from pacing.orchestrator import (
+                    _latest_calendar, _todays_slots, _is_approved,
+                    _already_ran, _mark, _today_priority_mode,
+                )
+
+                assert _is_approved(conn), "Approval should be set"
+                decision_id, all_slots = _latest_calendar(conn)
+                today_slots = _todays_slots(all_slots)
+                assert any(s["audience"] == aud for s in today_slots)
+
+                for slot in today_slots:
+                    if slot["audience"] == aud and not _already_ran(conn, decision_id, slot):
+                        notes = _fake_handler(slot)
+                        klaviyo_id = notes[len("klaviyo_draft:"):] if notes.startswith("klaviyo_draft:") else None
+                        _mark(conn, decision_id, slot, "dispatched", notes, klaviyo_campaign_id=klaviyo_id)
+
+            row = conn.execute(
+                "SELECT status, klaviyo_campaign_id FROM calendar_executions WHERE audience=%s AND slot_date=%s",
+                (aud, date.today().isoformat())
+            ).fetchone()
+            assert row is not None, "Execution row must be written"
+            assert row[0] == "dispatched"
+            assert row[1] and row[1].startswith("CAMP_"), "campaign_id must be stored"
+        finally:
+            # _mark() called conn.commit() — undo everything it wrote to production
+            conn.execute("DELETE FROM calendar_executions WHERE audience = %s", (aud,))
+            conn.execute("DELETE FROM decisions WHERE id = %s", (decision_id,))
+            today = date.today()
+            week_start = today - timedelta(days=today.weekday())
+            conn.execute(
+                "DELETE FROM calendar_approvals WHERE week_start = %s AND approved_by = 'test'",
+                (week_start,)
             )
-
-            assert _is_approved(conn), "Approval should be set"
-            decision_id, all_slots = _latest_calendar(conn)
-            today_slots = _todays_slots(all_slots)
-            assert any(s["audience"] == aud for s in today_slots)
-
-            for slot in today_slots:
-                if slot["audience"] == aud and not _already_ran(conn, decision_id, slot):
-                    notes = _fake_handler(slot)
-                    klaviyo_id = notes[len("klaviyo_draft:"):] if notes.startswith("klaviyo_draft:") else None
-                    _mark(conn, decision_id, slot, "dispatched", notes, klaviyo_campaign_id=klaviyo_id)
-
-        row = conn.execute(
-            "SELECT status, klaviyo_campaign_id FROM calendar_executions WHERE audience=%s AND slot_date=%s",
-            (aud, date.today().isoformat())
-        ).fetchone()
-        assert row is not None, "Execution row must be written"
-        assert row[0] == "dispatched"
-        assert row[1] and row[1].startswith("CAMP_"), "campaign_id must be stored"
+            conn.commit()
 
     def test_approval_gate_blocks_dispatch(self, conn):
         """No approval → _is_approved returns False."""
@@ -310,18 +322,23 @@ class TestSniperEndToEnd:
         did = str(uuid.uuid4())
         assert _already_ran(conn, did, sniper_slot) is False, "Sniper not yet dispatched"
 
-        # Dispatch sniper
-        _mark(conn, did, sniper_slot, "dispatched",
-              f"klaviyo_draft:{sniper_cid}", klaviyo_campaign_id=sniper_cid)
+        try:
+            # Dispatch sniper — _mark() calls conn.commit(), committing the parent
+            # _insert_exec() row above as well. Cleaned up in finally.
+            _mark(conn, did, sniper_slot, "dispatched",
+                  f"klaviyo_draft:{sniper_cid}", klaviyo_campaign_id=sniper_cid)
 
-        row = conn.execute(
-            "SELECT status, klaviyo_campaign_id FROM calendar_executions "
-            "WHERE audience=%s AND content_type='sniper_followup' AND slot_date=%s",
-            (parent_aud, date.today().isoformat())
-        ).fetchone()
-        assert row is not None
-        assert row[0] == "dispatched"
-        assert row[1] == sniper_cid
+            row = conn.execute(
+                "SELECT status, klaviyo_campaign_id FROM calendar_executions "
+                "WHERE audience=%s AND content_type='sniper_followup' AND slot_date=%s",
+                (parent_aud, date.today().isoformat())
+            ).fetchone()
+            assert row is not None
+            assert row[0] == "dispatched"
+            assert row[1] == sniper_cid
+        finally:
+            conn.execute("DELETE FROM calendar_executions WHERE audience = %s", (parent_aud,))
+            conn.commit()
 
     def test_r2_allows_sniper_within_7_days_of_parent(self, conn):
         """R2: sniper_followup passes within 7-day window when parent klaviyo_campaign present."""

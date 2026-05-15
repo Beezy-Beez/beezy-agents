@@ -121,6 +121,12 @@ def run_sleep_audio_slot(slot: dict) -> str:
     """Full automatic pipeline for a calendar sleep_audio slot.
     Returns a status string written to calendar_executions.notes.
     """
+    from lib.dryrun import is_dry_run
+    if is_dry_run():
+        topic = slot.get("topic_angle", "?")
+        print(f"[sleep_audio/DRY RUN] would generate episode: {topic!r}")
+        return "dry-run:sleep_audio_skipped"
+
     topic        = slot.get("topic_angle", "")
     episode_type = slot.get("episode_type", "sleep_story")
     duration     = int(slot.get("duration_minutes", 25))

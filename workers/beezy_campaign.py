@@ -190,7 +190,12 @@ def _create_shopify_page(slug: str, title: str, html: str) -> str:
         })
 
     resp.raise_for_status()
-    return "https://" + shop + "/pages/" + slug
+    rdata  = resp.json().get("data", {})
+    result = rdata.get("pageCreate") or rdata.get("pageUpdate") or {}
+    errors = result.get("userErrors", [])
+    if errors:
+        raise RuntimeError(f"Shopify page mutation errors: {errors}")
+    return "https://trybeezybeez.com/pages/" + slug
 
 
 # ── Step 2: Shopify discount creation ─────────────────────────────────────────
