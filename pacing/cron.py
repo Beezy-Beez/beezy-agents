@@ -60,14 +60,22 @@ def _money(value: Decimal) -> str:
 
 def _insert_pacing_state(conn, state: PacingState) -> str:
     with conn.cursor() as cur:
+        # Dedup: if today already has a row for this goal, skip the duplicate insert.
+        cur.execute(
+            "SELECT id FROM pacing_state WHERE goal_id=%s AND measured_at::date = %s::date LIMIT 1",
+            (state.goal_id, state.as_of),
+        )
+        existing = cur.fetchone()
+        if existing:
+            return str(existing[0])
+
         cur.execute(
             """
-            insert into pacing_state
+            INSERT INTO pacing_state
               (goal_id, measured_at, period_to_date_value, target_to_date_value,
                gap_pct, days_remaining, required_daily_rate)
-            values
-              (%s, %s, %s, %s, %s, %s, %s)
-            returning id
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
             """,
             (
                 state.goal_id,

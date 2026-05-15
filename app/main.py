@@ -47,6 +47,38 @@ async def _slack_loop():
             await asyncio.sleep(30)
 
 
+def _mark_ran_today(key: str) -> None:
+    """Write today's date into agent_state so catch-up logic knows this job ran."""
+    try:
+        from db.connection import get_conn
+        from datetime import date
+        today = date.today().isoformat()
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO agent_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+                (key, today),
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+
+def _ran_today(key: str) -> bool:
+    """Return True if this job already ran today (checked via agent_state)."""
+    try:
+        from db.connection import get_conn
+        from datetime import date
+        today = date.today().isoformat()
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM agent_state WHERE key = %s", (key,)
+            ).fetchone()
+        return row is not None and row[0] == today
+    except Exception:
+        return False
+
+
 def _run_cron_jobs(now: datetime) -> None:
     """Synchronous cron dispatch — runs in a thread executor."""
     h, m = now.hour, now.minute
@@ -60,21 +92,27 @@ def _run_cron_jobs(now: datetime) -> None:
         except Exception as e:
             print(f"[cron] ingestion error: {e}")
 
-    if h == 7 and m == 30:
-        try:
-            from pacing.cron import run_daily as pacing_daily
-            print("[cron] pacing brain")
-            pacing_daily()
-        except Exception as e:
-            print(f"[cron] pacing error: {e}")
+    # Pacing brain: 7:30am ET target. Catch-up window: 7:30–8:29am (server-restart safe).
+    if (h == 7 and m >= 30) or h == 8:
+        if not _ran_today("cron_pacing_brain"):
+            try:
+                from pacing.cron import run_daily as pacing_daily
+                print("[cron] pacing brain" + (" [catch-up]" if not (h == 7 and m == 30) else ""))
+                pacing_daily()
+                _mark_ran_today("cron_pacing_brain")
+            except Exception as e:
+                print(f"[cron] pacing error: {e}")
 
-    if h == 8 and m == 0:
-        try:
-            from pacing.orchestrator import run_daily
-            print("[cron] orchestrator")
-            run_daily()
-        except Exception as e:
-            print(f"[cron] orchestrator error: {e}")
+    # Orchestrator: 8:00am ET target. Catch-up window: 8:00–9:00am (runs once via _ran_today guard).
+    if h == 8 or (h == 9 and m == 0):
+        if not _ran_today("cron_orchestrator"):
+            try:
+                from pacing.orchestrator import run_daily
+                print("[cron] orchestrator" + (" [catch-up]" if not (h == 8 and m == 0) else ""))
+                run_daily()
+                _mark_ran_today("cron_orchestrator")
+            except Exception as e:
+                print(f"[cron] orchestrator error: {e}")
 
     # Audience health monitor — daily at 7:40am
     if h == 7 and m == 40:

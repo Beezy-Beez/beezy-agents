@@ -271,6 +271,13 @@ HANDLERS = {
 def run_daily():
     print("[orchestrator] Daily dispatch starting...")
     with get_conn() as conn:
+        # Advisory lock prevents concurrent runs (e.g. cron + manual Slack trigger)
+        with conn.cursor() as _lk:
+            _lk.execute("SELECT pg_try_advisory_lock(7777777777)")
+            if not _lk.fetchone()[0]:
+                print("[orchestrator] Another instance is already running — skipping duplicate.")
+                return
+
         if not _is_approved(conn):
             print("[orchestrator] Week not approved -- skipping.")
             post_draft(
