@@ -110,26 +110,54 @@ def _audience_sent_today(conn, audience: str) -> bool:
         return cur.fetchone() is not None
 
 
+def _next_calendar_topic(conn, audience: str) -> str | None:
+    """Find the next unexecuted calendar slot for this audience and return its topic_angle."""
+    today = date.today().isoformat()
+    month = date.today().strftime("%Y-%m")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT output FROM decisions WHERE decision_type='calendar_plan' "
+            "AND output->>'month' = %s ORDER BY created_at DESC LIMIT 1",
+            (month,)
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    import json as _json
+    slots = (row[0] if isinstance(row[0], dict) else _json.loads(row[0])).get("slots", [])
+    future_slots = [
+        s for s in slots
+        if s.get("audience") == audience
+        and s.get("date", "") >= today
+        and s.get("content_type") in ("klaviyo_campaign", "sniper_followup")
+    ]
+    if future_slots:
+        return future_slots[0].get("topic_angle")
+    return None
+
+
 def _boost_candidate_slot(conn) -> dict | None:
     """
     BOOST mode: find the best eligible audience for an emergency extra send.
     Respects R2 (7-day cooldown) — never bypasses it.
+    Uses the next planned calendar topic for the audience; falls back to hardcoded angle.
     Returns a ready-to-dispatch slot dict, or None if all are in cooldown.
     """
     today = date.today().isoformat()
-    for audience, est_rev, topic in BOOST_AUDIENCE_PRIORITY:
+    for audience, est_rev, fallback_topic in BOOST_AUDIENCE_PRIORITY:
         if _audience_in_cooldown(conn, audience):
             print(f"[orchestrator/boost] {audience} in 7-day cooldown — skipping")
             continue
         if _audience_sent_today(conn, audience):
             print(f"[orchestrator/boost] {audience} already sent today — skipping")
             continue
-        print(f"[orchestrator/boost] Selected emergency slot: {audience} (~${est_rev}/send)")
+        topic = _next_calendar_topic(conn, audience) or (fallback_topic + " [BOOST]")
+        print(f"[orchestrator/boost] Selected emergency slot: {audience} (~${est_rev}/send) | {topic[:60]}")
         return {
             "date":             today,
             "content_type":     "klaviyo_campaign",
             "audience":         audience,
-            "topic_angle":      topic + " [BOOST]",
+            "topic_angle":      topic,
             "send_time_est":    "15:00",
             "priority":         "high",
             "revenue_estimate": float(est_rev),
