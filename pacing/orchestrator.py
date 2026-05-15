@@ -88,13 +88,14 @@ def _already_ran(conn, decision_id, slot):
 
 
 def _audience_in_cooldown(conn, audience: str) -> bool:
-    """Return True if this audience was sent to within the last 7 days (R2 check)."""
+    """Return True if this audience was sent to within the last 7 days (R2 check).
+    Query mirrors validator._r2_audience_cooldown exactly: exclusive boundary, dispatched/completed only."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT 1 FROM calendar_executions "
             "WHERE audience = %s "
-            "AND slot_date >= CURRENT_DATE - INTERVAL '7 days' "
-            "AND status NOT IN ('failed', 'skipped') LIMIT 1",
+            "AND slot_date > CURRENT_DATE - INTERVAL '7 days' "
+            "AND status IN ('dispatched', 'completed') LIMIT 1",
             (audience,)
         )
         return cur.fetchone() is not None

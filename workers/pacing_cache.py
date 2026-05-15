@@ -20,9 +20,16 @@ def refresh_pacing_cache():
             }}
         })
         if resp.status_code == 200:
-            for r in resp.json().get("data", {}).get("attributes", {}).get("results", []):
-                campaign_rev += float(r.get("statistics", {}).get("conversion_value", 0))
+            results = resp.json().get("data", {}).get("attributes", {}).get("results", [])
+            print(f"[pacing_cache] campaign results: {len(results)} rows")
+            for r in results:
+                val = float(r.get("statistics", {}).get("conversion_value", 0))
+                campaign_rev += val
                 campaign_count += 1
+                if val > 0:
+                    print(f"[pacing_cache]   campaign {r.get('id','?')}: ${val:,.2f}")
+        else:
+            print(f"[pacing_cache] campaign pull HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
         print(f"[pacing_cache] campaign pull failed: {e}")
 
@@ -35,8 +42,15 @@ def refresh_pacing_cache():
             }}
         })
         if resp.status_code == 200:
-            for r in resp.json().get("data", {}).get("attributes", {}).get("results", []):
-                flow_rev += float(r.get("statistics", {}).get("conversion_value", 0))
+            results = resp.json().get("data", {}).get("attributes", {}).get("results", [])
+            print(f"[pacing_cache] flow results: {len(results)} rows")
+            for r in results:
+                val = float(r.get("statistics", {}).get("conversion_value", 0))
+                flow_rev += val
+                if val > 0:
+                    print(f"[pacing_cache]   flow {r.get('id','?')}: ${val:,.2f}")
+        else:
+            print(f"[pacing_cache] flow pull HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
         print(f"[pacing_cache] flow pull failed: {e}")
 
