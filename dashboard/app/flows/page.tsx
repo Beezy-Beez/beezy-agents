@@ -1,240 +1,236 @@
 "use client";
 
 import useSWR from "swr";
+import { Workflow, ShieldCheck } from "lucide-react";
 import { fetcher, apiPost } from "@/lib/api";
-import type { FlowsData } from "@/lib/types";
-import { useState } from "react";
+import { money, num, pct, statusTone } from "@/lib/format";
+import { Card, CardHeader } from "@/components/Card";
+import StatCard from "@/components/StatCard";
+import Badge from "@/components/Badge";
+import PageHeader from "@/components/PageHeader";
+import ActionButton from "@/components/ActionButton";
+import DataTable from "@/components/DataTable";
+import type { Column } from "@/components/DataTable";
+import { EmptyState, ErrorState, PageSkeleton } from "@/components/States";
 
-const SEV_CONFIG = {
-  ok:       { label: "HEALTHY",  bg: "#1e7e34" },
-  warn:     { label: "WARNING",  bg: "#e07b00" },
-  critical: { label: "CRITICAL", bg: "#c0392b" },
-};
+const REFRESH = 30_000;
+
+type Loose = Record<string, unknown>;
+type FlowRow = Loose & { _group: string };
+
+function asNumber(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function asString(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
 
 export default function FlowsPage() {
-  const { data, error, mutate } = useSWR<FlowsData>("/api/data/flows", fetcher, {
-    refreshInterval: 30_000,
+  const deliv = useSWR<Loose>("/api/data/deliverability", fetcher, {
+    refreshInterval: REFRESH,
   });
-  const [running, setRunning] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
+  const flows = useSWR<Loose>("/api/data/flows", fetcher, {
+    refreshInterval: REFRESH,
+  });
 
-  const handleRun = async () => {
-    setRunning(true);
-    setMsg(null);
-    try {
-      await apiPost("/api/run-flow-check");
-      setMsg("Flow check started. This takes ~30 seconds. Refresh in a moment.");
-      setTimeout(() => mutate(), 35_000);
-    } catch (e: unknown) {
-      setMsg(e instanceof Error ? e.message : "Error");
-    } finally {
-      setRunning(false);
+  if (deliv.error || flows.error)
+    return <ErrorState msg="backend unreachable" />;
+  if (!deliv.data || !flows.data) return <PageSkeleton />;
+
+  const d = deliv.data;
+  const f = flows.data;
+
+  const deliveryRate = asNumber(d.delivery_rate);
+  const bounceRate = asNumber(d.bounce_rate);
+  const unsubRate = asNumber(d.unsub_rate);
+  const recipients = asNumber(d.recipients);
+  const source = asString(d._source) || "—";
+  const checkedAt = asString(d._checked_at);
+
+  // Flatten every array-valued property of the loose flows object.
+  const rows: FlowRow[] = [];
+  for (const [key, val] of Object.entries(f)) {
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (item && typeof item === "object") {
+          rows.push({ ...(item as Loose), _group: key });
+        }
+      }
     }
-  };
-
-  if (error) {
-    return (
-      <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-700">
-        Failed to load flow data: {error.message}
-      </div>
-    );
   }
 
-  if (!data) {
-    return (
-      <div className="space-y-4">
-        <div className="skeleton h-10 w-64 rounded-xl" />
-        <div className="skeleton h-[400px] w-full rounded-xl" />
-      </div>
-    );
-  }
+  const nonUnderscoreKeys = Object.keys(f).filter((k) => !k.startsWith("_"));
+  const flowsCheckedAt = asString(f._checked_at);
 
-  const analyses = data.analyses ?? [];
-  const checkedAt = data._checked_at ?? "";
-
-  const healthCount = analyses.filter((a) => a.severity === "ok").length;
-  const warnCount = analyses.filter((a) => a.severity === "warn").length;
-  const critCount = analyses.filter((a) => a.severity === "critical").length;
+  const columns: Column<FlowRow>[] = [
+    {
+      header: "Group",
+      render: (row) => <Badge tone="muted">{row._group}</Badge>,
+    },
+    {
+      header: "Flow",
+      render: (row) => {
+        const r = row as Loose;
+        const name = asString(r.name) || asString(r.flow_id) || "—";
+        return <span className="font-medium text-ink">{name}</span>;
+      },
+    },
+    {
+      header: "Revenue",
+      className: "tabular-nums",
+      render: (row) => {
+        const r = row as Loose;
+        return typeof r.revenue === "number" ? money(r.revenue) : "—";
+      },
+    },
+    {
+      header: "RPR",
+      className: "tabular-nums",
+      render: (row) => {
+        const r = row as Loose;
+        return typeof r.rpr === "number" ? `$${r.rpr.toFixed(3)}` : "—";
+      },
+    },
+    {
+      header: "Recipients",
+      className: "tabular-nums",
+      render: (row) => {
+        const r = row as Loose;
+        return typeof r.recipients === "number" ? num(r.recipients) : "—";
+      },
+    },
+    {
+      header: "Status",
+      render: (row) => {
+        const r = row as Loose;
+        if (r.severity != null) {
+          const s = String(r.severity);
+          return <Badge tone={statusTone(s)}>{s}</Badge>;
+        }
+        if (r.fix_queued) return <Badge tone="warn">fix queued</Badge>;
+        return "—";
+      },
+    },
+  ];
 
   return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <h1
-          className="text-2xl font-bold text-[#8b4513]"
-          style={{ fontFamily: "var(--font-dm-serif)" }}
-        >
-          Flows
-        </h1>
-        <div className="flex items-center gap-3">
-          {checkedAt && (
-            <span className="text-xs text-gray-400">Last checked: {checkedAt}</span>
-          )}
-          <button
-            onClick={handleRun}
-            disabled={running}
-            className="px-4 py-2 bg-[#8b4513] text-white rounded-lg text-sm font-semibold hover:bg-[#6d3410] transition-colors disabled:opacity-60"
-          >
-            {running ? "Running…" : "Run Flow Check"}
-          </button>
-        </div>
+    <>
+      <PageHeader
+        title="Flows & Deliverability"
+        sub="Klaviyo flow health and sending reputation"
+        actions={
+          <>
+            <ActionButton
+              label="Run flow check"
+              icon={<Workflow size={14} />}
+              run={() => apiPost("/api/run-flow-check")}
+              okMsg="Flow check started — refresh in ~30s"
+              onDone={() => flows.mutate()}
+            />
+            <ActionButton
+              label="Run deliverability check"
+              icon={<ShieldCheck size={14} />}
+              run={() => apiPost("/api/run-deliverability-check")}
+              okMsg="Deliverability check started"
+              onDone={() => deliv.mutate()}
+            />
+          </>
+        }
+      />
+
+      {/* Deliverability */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-2">
+        <StatCard
+          label="Delivery rate"
+          value={deliveryRate != null ? pct(deliveryRate, 2) : "—"}
+          delta={
+            deliveryRate != null
+              ? deliveryRate >= 99
+                ? "healthy"
+                : "low"
+              : undefined
+          }
+          deltaTone={
+            deliveryRate != null
+              ? deliveryRate >= 99
+                ? "good"
+                : "bad"
+              : undefined
+          }
+        />
+        <StatCard
+          label="Bounce rate"
+          value={bounceRate != null ? pct(bounceRate, 3) : "—"}
+          delta={
+            bounceRate != null
+              ? bounceRate > 0.5
+                ? "elevated"
+                : "clean"
+              : undefined
+          }
+          deltaTone={
+            bounceRate != null
+              ? bounceRate > 0.5
+                ? "bad"
+                : "good"
+              : undefined
+          }
+        />
+        <StatCard
+          label="Unsub rate"
+          value={unsubRate != null ? pct(unsubRate, 3) : "—"}
+          delta={
+            unsubRate != null
+              ? unsubRate > 0.3
+                ? "elevated"
+                : "clean"
+              : undefined
+          }
+          deltaTone={
+            unsubRate != null
+              ? unsubRate > 0.3
+                ? "bad"
+                : "good"
+              : undefined
+          }
+        />
+        <StatCard
+          label="Recipients 30d"
+          value={recipients != null ? num(recipients) : "—"}
+        />
       </div>
+      <p className="text-2xs text-ink-faint mb-5">
+        Source: {source}
+        {checkedAt ? ` · checked ${checkedAt}` : ""}
+      </p>
 
-      {msg && (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 text-sm text-blue-700">
-          {msg}
-        </div>
-      )}
-
-      {/* Summary pills */}
-      {analyses.length > 0 && (
-        <div className="flex gap-3 flex-wrap">
-          <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-4 py-2">
-            <span className="w-2 h-2 rounded-full bg-[#1e7e34]" />
-            <span className="text-sm font-semibold text-[#1e7e34]">{healthCount} Healthy</span>
-          </div>
-          <div className="flex items-center gap-2 bg-orange-50 border border-orange-200 rounded-lg px-4 py-2">
-            <span className="w-2 h-2 rounded-full bg-[#e07b00]" />
-            <span className="text-sm font-semibold text-[#e07b00]">{warnCount} Warning</span>
-          </div>
-          <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-lg px-4 py-2">
-            <span className="w-2 h-2 rounded-full bg-[#c0392b]" />
-            <span className="text-sm font-semibold text-[#c0392b]">{critCount} Critical</span>
-          </div>
-        </div>
-      )}
-
-      {/* Flow table */}
-      <div className="bg-white rounded-xl border border-[#e8dcc8] shadow-sm overflow-hidden">
-        <div className="px-5 py-4 border-b border-[#e8dcc8]">
-          <h2 className="text-[11px] font-semibold uppercase tracking-widest text-[#8b7355]">
-            Flow Health
-          </h2>
-        </div>
-
-        {analyses.length === 0 ? (
-          <div className="p-8 text-center">
-            <p className="text-gray-400 italic text-sm mb-2">
-              No flow data yet — runs weekly Sunday 9:15pm ET.
-            </p>
-            <p className="text-xs text-gray-400 mb-4">
-              Or click the button above to run now (pulls 30-day Klaviyo flow metrics).
-            </p>
-            <button
-              onClick={handleRun}
-              disabled={running}
-              className="px-5 py-2.5 bg-[#8b4513] text-white rounded-lg text-sm font-semibold hover:bg-[#6d3410] transition-colors disabled:opacity-60"
-            >
-              {running ? "Running…" : "Run Flow Health Check Now"}
-            </button>
-          </div>
+      {/* Flow health */}
+      <Card>
+        <CardHeader
+          title="Flow health"
+          sub={flowsCheckedAt ? `Checked ${flowsCheckedAt}` : undefined}
+          action={
+            rows.length === 0 && nonUnderscoreKeys.length > 0 ? (
+              <span className="text-xs text-ink-muted">
+                Raw analysis (no tabular flows detected)
+              </span>
+            ) : undefined
+          }
+        />
+        {rows.length > 0 ? (
+          <DataTable<FlowRow> columns={columns} rows={rows} />
+        ) : nonUnderscoreKeys.length > 0 ? (
+          <pre className="text-xs text-ink-soft bg-canvas border border-line rounded-lg p-4 overflow-auto">
+            {JSON.stringify(f, null, 2)}
+          </pre>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm border-collapse">
-              <thead>
-                <tr className="border-b-2 border-[#e8dcc8]">
-                  <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-5 py-3">
-                    Flow
-                  </th>
-                  <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3 whitespace-nowrap">
-                    30d Revenue
-                  </th>
-                  <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                    RPR
-                  </th>
-                  <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                    Status
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {analyses.map((flow, i) => {
-                  const sev = SEV_CONFIG[flow.severity] ?? {
-                    label: flow.severity.toUpperCase(),
-                    bg: "#888",
-                  };
-                  return (
-                    <tr
-                      key={i}
-                      className="border-b border-[#f0ece4] last:border-0 hover:bg-[#fdf8f2] transition-colors"
-                    >
-                      <td className="px-5 py-3 font-medium text-sm">
-                        {flow.name.length > 30
-                          ? flow.name.slice(0, 30) + "…"
-                          : flow.name}
-                      </td>
-                      <td className="px-3 py-3 text-sm font-semibold">
-                        ${Number(flow.revenue).toLocaleString("en-US", {
-                          maximumFractionDigits: 0,
-                        })}
-                      </td>
-                      <td className="px-3 py-3 text-sm">
-                        ${Number(flow.rpr).toFixed(2)}
-                      </td>
-                      <td className="px-3 py-3">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className="inline-block px-2 py-0.5 rounded-full text-white text-[11px] font-semibold"
-                            style={{ background: sev.bg }}
-                          >
-                            {sev.label}
-                          </span>
-                          {flow.fix_queued && (
-                            <span className="inline-block px-2 py-0.5 rounded-full bg-[#7b2d8b] text-white text-[11px] font-semibold">
-                              Fix queued
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <EmptyState
+            title="No flow analysis yet"
+            hint="Run a flow check to pull 30-day Klaviyo flow metrics."
+          />
         )}
-      </div>
-
-      {/* Flow benchmark reference */}
-      <div className="bg-white rounded-xl border border-[#e8dcc8] shadow-sm p-5">
-        <div className="text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] mb-3">
-          Flow RPR Benchmarks
-        </div>
-        <div className="overflow-x-auto">
-          <table className="text-sm border-collapse">
-            <thead>
-              <tr className="border-b border-[#e8dcc8]">
-                <th className="text-left text-[11px] font-semibold uppercase text-[#8b7355] pr-8 py-2">
-                  Flow Type
-                </th>
-                <th className="text-left text-[11px] font-semibold uppercase text-[#8b7355] pr-8 py-2">
-                  Min RPR
-                </th>
-                <th className="text-left text-[11px] font-semibold uppercase text-[#8b7355] py-2">
-                  Min Open Rate
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {[
-                ["welcome",            "$1.50", "40%"],
-                ["abandoned_checkout", "$2.00", "35%"],
-                ["abandoned_cart",     "$1.00", "35%"],
-                ["browse_abandonment", "$0.50", "30%"],
-                ["replenishment",      "$0.50", "30%"],
-                ["winback",            "$0.20", "25%"],
-                ["post_purchase",      "$0.50", "30%"],
-                ["membership",         "$0.50", "25%"],
-              ].map(([type, rpr, open]) => (
-                <tr key={type} className="border-b border-[#f0ece4] last:border-0">
-                  <td className="pr-8 py-1.5 font-mono text-xs text-[#2c2417]">{type}</td>
-                  <td className="pr-8 py-1.5 text-sm font-semibold">{rpr}</td>
-                  <td className="py-1.5 text-sm text-gray-500">{open}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
+      </Card>
+    </>
   );
 }

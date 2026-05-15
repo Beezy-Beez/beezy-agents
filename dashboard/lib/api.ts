@@ -2,26 +2,33 @@ const API_BASE =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
 export async function apiFetch<T>(path: string): Promise<T> {
-  const url = `${API_BASE}${path}`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`API ${path} → ${res.status}`);
   return res.json();
 }
 
-export async function apiPost(
+async function send(
+  method: string,
   path: string,
   body?: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const url = `${API_BASE}${path}`;
-  const res = await fetch(url, {
-    method: "POST",
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok && data.error) throw new Error(String(data.error));
+  if (!res.ok || data.error)
+    throw new Error(String(data.error || `${method} ${path} → ${res.status}`));
   return data;
 }
+
+export const apiPost = (p: string, b?: Record<string, unknown>) =>
+  send("POST", p, b);
+export const apiPatch = (p: string, b?: Record<string, unknown>) =>
+  send("PATCH", p, b);
+export const apiDelete = (p: string, b?: Record<string, unknown>) =>
+  send("DELETE", p, b);
 
 // SWR fetcher — used in all "use client" pages
 export const fetcher = (url: string) =>

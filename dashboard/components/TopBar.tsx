@@ -2,53 +2,47 @@
 
 import { useEffect, useState } from "react";
 
-function useNYTime() {
+export default function TopBar() {
   const [time, setTime] = useState("");
+  const [pulse, setPulse] = useState(false);
+
   useEffect(() => {
-    const tick = () => {
-      const s = new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/New_York",
-        weekday: "short",
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-      }).format(new Date());
-      setTime(s + " ET");
-    };
+    const tick = () =>
+      setTime(
+        new Intl.DateTimeFormat("en-US", {
+          timeZone: "America/New_York",
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        }).format(new Date()) + " ET"
+      );
     tick();
     const id = setInterval(tick, 30_000);
     return () => clearInterval(id);
   }, []);
-  return time;
-}
 
-export default function TopBar() {
-  const time = useNYTime();
-  const [refreshing, setRefreshing] = useState(false);
-
-  // Pulse every 30s to indicate auto-refresh
   useEffect(() => {
     const id = setInterval(() => {
-      setRefreshing(true);
-      setTimeout(() => setRefreshing(false), 600);
+      setPulse(true);
+      setTimeout(() => setPulse(false), 700);
     }, 30_000);
     return () => clearInterval(id);
   }, []);
 
   return (
-    <header className="sticky top-0 z-40 bg-[#faf6ee]/90 backdrop-blur border-b border-[#e8dcc8] px-6 py-3 flex items-center justify-between">
-      <div className="text-sm text-[#8b7355]">{time}</div>
-      <div className="flex items-center gap-2 text-xs text-[#8b7355]">
+    <header className="sticky top-0 z-30 h-16 bg-canvas/85 backdrop-blur border-b border-line px-7 flex items-center justify-end gap-4">
+      <span className="text-sm text-ink-muted tabular-nums">{time}</span>
+      <span className="flex items-center gap-1.5 text-xs text-ink-muted">
         <span
-          className={`inline-block w-2 h-2 rounded-full transition-colors ${
-            refreshing ? "bg-[#d4a847]" : "bg-[#1e7e34]"
+          className={`w-1.5 h-1.5 rounded-full transition-colors ${
+            pulse ? "bg-accent" : "bg-good"
           }`}
         />
-        Auto-refreshes every 30s
-      </div>
+        Live · 30s
+      </span>
     </header>
   );
 }

@@ -1,304 +1,439 @@
 "use client";
 
-import useSWR from "swr";
-import { fetcher, apiPost } from "@/lib/api";
-import type { CalendarData, CalendarSlot, ContentType } from "@/lib/types";
-import Badge from "@/components/Badge";
 import { useState } from "react";
+import useSWR from "swr";
+import {
+  Plus,
+  Pencil,
+  Trash2,
+  CalendarCheck,
+  CalendarRange,
+  Sparkles,
+  RotateCcw,
+} from "lucide-react";
+import { fetcher, apiPost, apiPatch, apiDelete } from "@/lib/api";
+import {
+  money,
+  ctLabel,
+  audLabel,
+  fmtDate,
+  fmtTime,
+  statusTone,
+} from "@/lib/format";
+import type { CalendarData, CalendarSlot, ContentType } from "@/lib/types";
+import { Card, CardHeader } from "@/components/Card";
+import PageHeader from "@/components/PageHeader";
+import StatCard from "@/components/StatCard";
+import Badge from "@/components/Badge";
+import Button from "@/components/Button";
+import ActionButton from "@/components/ActionButton";
+import DataTable, { type Column } from "@/components/DataTable";
+import Drawer from "@/components/Drawer";
+import { Field, TextInput, Select } from "@/components/Field";
+import { ErrorState, PageSkeleton } from "@/components/States";
+import { useToast } from "@/components/Toast";
 
-function fmt$(n: number) {
-  if (!n) return "—";
-  return "$" + n.toLocaleString("en-US", { maximumFractionDigits: 0 });
-}
+const REFRESH = 30_000;
+const TODAY = new Date().toISOString().slice(0, 10);
 
-function fmt12h(tm: string) {
-  if (!tm) return "—";
-  const [hh, mm] = tm.split(":");
-  const h = parseInt(hh, 10);
-  const suffix = h >= 12 ? "pm" : "am";
-  const h12 = h % 12 === 0 ? 12 : h % 12;
-  return `${h12}:${mm} ${suffix}`;
-}
-
-const CT_BORDER: Record<string, string> = {
-  klaviyo_campaign: "#1a73e8",
-  sniper_followup:  "#1558b0",
-  hive_mind:        "#7b2d8b",
-  seo_blog:         "#1e7e34",
-  sleep_audio:      "#0e7c7b",
-  sms_campaign:     "#e07b00",
-  flow_experiment:  "#888",
-  not_sent:         "#ddd",
-};
-
-const FILTERS: Array<{ label: string; types: ContentType[] | null }> = [
-  { label: "All", types: null },
-  { label: "Email", types: ["klaviyo_campaign", "sniper_followup"] },
-  { label: "Hive Mind", types: ["hive_mind"] },
-  { label: "SMS", types: ["sms_campaign"] },
-  { label: "SEO", types: ["seo_blog"] },
-  { label: "Sleep Audio", types: ["sleep_audio"] },
+const CONTENT_TYPES: ContentType[] = [
+  "klaviyo_campaign",
+  "sniper_followup",
+  "hive_mind",
+  "seo_blog",
+  "sleep_audio",
+  "sms_campaign",
+  "flow_experiment",
 ];
 
-export default function CalendarPage() {
-  const { data, error, mutate } = useSWR<CalendarData>("/api/data/calendar", fetcher, {
-    refreshInterval: 30_000,
-  });
-  const [filter, setFilter] = useState<string>("All");
+const CT_OPTIONS = CONTENT_TYPES.map((c) => ({
+  value: c,
+  label: ctLabel(c),
+}));
 
-  if (error) {
-    return (
-      <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-700">
-        Failed to load calendar: {error.message}
-      </div>
-    );
+const PRIORITY_OPTIONS = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+];
+
+interface SlotForm {
+  date: string;
+  content_type: ContentType;
+  audience: string;
+  topic_angle: string;
+  send_time_est: string;
+  revenue_estimate: string;
+  priority: string;
+  rationale: string;
+}
+
+const emptyForm = (): SlotForm => ({
+  date: TODAY,
+  content_type: "klaviyo_campaign",
+  audience: "",
+  topic_angle: "",
+  send_time_est: "",
+  revenue_estimate: "",
+  priority: "medium",
+  rationale: "",
+});
+
+export default function Calendar() {
+  const { toast } = useToast();
+  const { data, error, mutate } = useSWR<CalendarData>(
+    "/api/data/calendar",
+    fetcher,
+    { refreshInterval: REFRESH }
+  );
+
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [editing, setEditing] = useState<CalendarSlot | null>(null);
+  const [form, setForm] = useState<SlotForm>(emptyForm());
+  const [saving, setSaving] = useState(false);
+
+  if (error) return <ErrorState msg="backend unreachable" />;
+  if (!data) return <PageSkeleton />;
+
+  const { slots, approval } = data;
+
+  const sorted = [...slots].sort((a, b) =>
+    a.date === b.date
+      ? (a.tm || "").localeCompare(b.tm || "")
+      : a.date.localeCompare(b.date)
+  );
+
+  const actualBooked = slots.reduce(
+    (acc, s) => acc + (Number(s.actual_rev) || 0),
+    0
+  );
+
+  function openCreate() {
+    setEditing(null);
+    setForm(emptyForm());
+    setDrawerOpen(true);
   }
 
-  if (!data) {
-    return (
-      <div className="space-y-4">
-        <div className="skeleton h-10 w-64 rounded-xl" />
-        <div className="skeleton h-[600px] w-full rounded-xl" />
-      </div>
-    );
+  function openEdit(slot: CalendarSlot) {
+    setEditing(slot);
+    setForm({
+      date: slot.date,
+      content_type: slot.t,
+      audience: slot.a,
+      topic_angle: slot.tp || "",
+      send_time_est: slot.tm || "",
+      revenue_estimate: slot.rv != null ? String(slot.rv) : "",
+      priority: "medium",
+      rationale: "",
+    });
+    setDrawerOpen(true);
   }
 
-  const today = new Date().toISOString().slice(0, 10);
-  const { slots, approval: apv } = data;
+  function patch<K extends keyof SlotForm>(key: K, value: SlotForm[K]) {
+    setForm((f) => ({ ...f, [key]: value }));
+  }
 
-  const activeFilter = FILTERS.find((f) => f.label === filter)!;
-  const filtered = activeFilter.types
-    ? slots.filter((s) => (activeFilter.types as string[]).includes(s.t))
-    : slots;
+  async function save() {
+    setSaving(true);
+    try {
+      const fields = {
+        date: form.date,
+        content_type: form.content_type,
+        audience: form.audience,
+        topic_angle: form.topic_angle,
+        send_time_est: form.send_time_est,
+        revenue_estimate: Number(form.revenue_estimate) || 0,
+        priority: form.priority,
+        rationale: form.rationale,
+      };
+      if (editing) {
+        await apiPatch("/api/calendar/slot", {
+          locator: {
+            date: editing.date,
+            content_type: editing.t,
+            audience: editing.a,
+          },
+          fields,
+        });
+      } else {
+        await apiPost("/api/calendar/slot", fields);
+      }
+      toast("Saved", "success");
+      mutate();
+      setDrawerOpen(false);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    } finally {
+      setSaving(false);
+    }
+  }
 
-  const totalEst = slots
-    .filter((s) => s.t !== "seo_blog" && s.t !== "flow_experiment")
-    .reduce((sum, s) => sum + (s.rv || 0), 0);
-  const totalActual = slots.reduce((sum, s) => sum + (s.actual_rev || 0), 0);
+  const columns: Column<CalendarSlot>[] = [
+    {
+      header: "Date",
+      className: "whitespace-nowrap text-ink font-medium",
+      render: (r) => fmtDate(r.date),
+    },
+    {
+      header: "Type",
+      render: (r) => <Badge tone="accent">{ctLabel(r.t)}</Badge>,
+    },
+    {
+      header: "Audience",
+      className: "whitespace-nowrap",
+      render: (r) => audLabel(r.a),
+    },
+    {
+      header: "Topic",
+      render: (r) => (
+        <span
+          className="block max-w-[20rem] truncate text-ink-soft"
+          title={r.tp || ""}
+        >
+          {r.tp || "—"}
+        </span>
+      ),
+    },
+    {
+      header: "Time",
+      className: "whitespace-nowrap tabular-nums",
+      render: (r) => fmtTime(r.tm) || "—",
+    },
+    {
+      header: "Est",
+      className: "tabular-nums whitespace-nowrap",
+      render: (r) => money(r.rv),
+    },
+    {
+      header: "Actual",
+      className: "tabular-nums whitespace-nowrap",
+      render: (r) => {
+        const s = (r.status || "").toLowerCase();
+        if (["sent", "dispatched", "completed"].includes(s)) {
+          const hit = Number(r.actual_rev) >= Number(r.rv);
+          return (
+            <span
+              className={hit ? "text-good font-medium" : "text-bad font-medium"}
+            >
+              {money(r.actual_rev)}
+            </span>
+          );
+        }
+        return <span className="text-ink-faint">—</span>;
+      },
+    },
+    {
+      header: "Status",
+      render: (r) => <Badge tone={statusTone(r.status)}>{r.status}</Badge>,
+    },
+    {
+      header: "",
+      headerClassName: "w-px",
+      className: "whitespace-nowrap",
+      render: (r) => (
+        <div className="flex items-center justify-end gap-1.5">
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<Pencil size={13} />}
+            onClick={() => openEdit(r)}
+            aria-label="Edit slot"
+          />
+          {r.status === "failed" && (
+            <ActionButton
+              label="Retry"
+              size="sm"
+              icon={<RotateCcw size={13} />}
+              run={() => apiPost(`/api/retry-slot?id=${r.exec_id}`)}
+              okMsg="Slot re-queued"
+              onDone={() => mutate()}
+            />
+          )}
+          <ActionButton
+            label=""
+            variant="danger"
+            size="sm"
+            icon={<Trash2 size={13} />}
+            confirm="Delete this slot?"
+            run={() =>
+              apiDelete("/api/calendar/slot", {
+                date: r.date,
+                content_type: r.t,
+                audience: r.a,
+              })
+            }
+            okMsg="Slot deleted"
+            onDone={() => mutate()}
+          />
+        </div>
+      ),
+    },
+  ];
 
   return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <h1
-          className="text-2xl font-bold text-[#8b4513]"
-          style={{ fontFamily: "var(--font-dm-serif)" }}
-        >
-          Calendar
-        </h1>
-        <div className="flex items-center gap-3 text-sm text-gray-500">
-          <span>Est: {fmt$(totalEst)}</span>
-          {totalActual > 0 && <span>Actual: {fmt$(totalActual)}</span>}
-        </div>
+    <>
+      <PageHeader
+        title="Calendar"
+        sub="Plan vs actual — edit, add, approve"
+        actions={
+          <>
+            <Button
+              variant="primary"
+              icon={<Plus size={14} />}
+              onClick={openCreate}
+            >
+              Add slot
+            </Button>
+            <ActionButton
+              label="Approve week"
+              icon={<CalendarCheck size={14} />}
+              run={() => apiPost("/api/approve-week")}
+              okMsg="This week approved"
+              onDone={() => mutate()}
+            />
+            <ActionButton
+              label="Approve month"
+              icon={<CalendarRange size={14} />}
+              run={() => apiPost("/api/approve-month")}
+              okMsg="Month approved"
+              onDone={() => mutate()}
+            />
+            <ActionButton
+              label="Generate calendar"
+              icon={<Sparkles size={14} />}
+              confirm="Regenerate this month's calendar? This calls Opus."
+              run={() => apiPost("/api/generate-calendar")}
+              okMsg="Calendar regeneration started"
+              onDone={() => mutate()}
+            />
+          </>
+        }
+      />
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+        <StatCard
+          label="Upcoming slots"
+          value={approval.upcoming_count}
+          icon={<CalendarRange size={15} />}
+        />
+        <StatCard
+          label="Est. revenue"
+          value={money(approval.total_estimated_rev)}
+          sub="planned this month"
+        />
+        <StatCard
+          label="Actual booked"
+          value={money(actualBooked)}
+          sub="attributed so far"
+        />
+        <StatCard
+          label="Week status"
+          value={
+            <Badge tone={approval.week_approved ? "good" : "warn"} dot>
+              {approval.week_approved ? "Approved" : "Pending"}
+            </Badge>
+          }
+          sub={
+            approval.week_start
+              ? `Week of ${fmtDate(approval.week_start)}`
+              : undefined
+          }
+        />
       </div>
 
-      {/* Approval banner */}
-      {!apv.week_approved && (
-        <div className="flex items-center gap-4 bg-yellow-50 border border-yellow-200 rounded-xl px-5 py-3">
-          <span className="text-yellow-700 font-semibold text-sm">
-            ⚠ This week not yet approved
-          </span>
-          <button
-            onClick={() => apiPost("/api/approve-week").then(() => mutate())}
-            className="px-4 py-1.5 bg-[#8b4513] text-white rounded-lg text-sm font-semibold hover:bg-[#6d3410] transition-colors"
-          >
-            Approve Week
-          </button>
-        </div>
-      )}
+      <Card>
+        <CardHeader
+          title="Schedule"
+          sub={`${slots.length} slot${slots.length === 1 ? "" : "s"} this month`}
+        />
+        <DataTable<CalendarSlot>
+          columns={columns}
+          rows={sorted}
+          rowClassName={(r) => (r.date === TODAY ? "bg-accent-soft/60" : "")}
+          emptyMessage="No calendar plan for this month — generate one."
+        />
+      </Card>
 
-      {/* Filter pills */}
-      <div className="flex flex-wrap gap-2">
-        {FILTERS.map((f) => (
-          <button
-            key={f.label}
-            onClick={() => setFilter(f.label)}
-            className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
-              filter === f.label
-                ? "bg-[#8b4513] text-white"
-                : "bg-white border border-[#e8dcc8] text-[#2c2417] hover:border-[#8b4513]"
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Calendar table */}
-      <div className="bg-white rounded-xl border border-[#e8dcc8] shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm border-collapse">
-            <thead>
-              <tr className="border-b-2 border-[#e8dcc8]">
-                <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-4 py-3 whitespace-nowrap">
-                  Date
-                </th>
-                <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                  Type
-                </th>
-                <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                  Audience
-                </th>
-                <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                  Topic
-                </th>
-                <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3 whitespace-nowrap">
-                  Time
-                </th>
-                <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3 whitespace-nowrap">
-                  Est. Rev
-                </th>
-                <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3 whitespace-nowrap">
-                  Actual
-                </th>
-                <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                  Status
-                </th>
-                <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={9} className="px-4 py-8 text-center text-gray-400 italic">
-                    No slots found.
-                  </td>
-                </tr>
-              ) : (
-                (() => {
-                  let lastDate = "";
-                  return filtered.map((slot, i) => {
-                    const isToday = slot.date === today;
-                    const isPast = slot.date < today;
-                    const showDate = slot.date !== lastDate;
-                    if (showDate) lastDate = slot.date;
-
-                    const borderColor =
-                      slot.status === "not_sent"
-                        ? "#ddd"
-                        : CT_BORDER[slot.t] || "#555";
-
-                    let dateLabel = "";
-                    if (showDate) {
-                      try {
-                        const d = new Date(slot.date + "T12:00:00");
-                        dateLabel = d.toLocaleDateString("en-US", {
-                          weekday: "short",
-                          month: "short",
-                          day: "numeric",
-                        });
-                      } catch {
-                        dateLabel = slot.date;
-                      }
-                    }
-
-                    // Actual revenue
-                    let actualNode: React.ReactNode = "—";
-                    if (slot.actual_rev && slot.actual_rev > 0) {
-                      const diff = slot.rv > 0
-                        ? ((slot.actual_rev - slot.rv) / slot.rv) * 100
-                        : 0;
-                      const diffColor = slot.actual_rev >= slot.rv ? "#1e7e34" : "#c0392b";
-                      actualNode = (
-                        <span>
-                          {fmt$(slot.actual_rev)}{" "}
-                          {slot.rv > 0 && (
-                            <span className="text-[11px]" style={{ color: diffColor }}>
-                              ({diff > 0 ? "+" : ""}
-                              {diff.toFixed(0)}%)
-                            </span>
-                          )}
-                        </span>
-                      );
-                    } else if (
-                      (slot.status === "dispatched" || slot.status === "completed") &&
-                      slot.date <= today
-                    ) {
-                      actualNode = (
-                        <span className="text-[11px] text-gray-400">pending backfill</span>
-                      );
-                    }
-
-                    return (
-                      <tr
-                        key={i}
-                        style={{ borderLeft: `3px solid ${borderColor}` }}
-                        className={`border-b border-[#f0ece4] last:border-0 transition-colors hover:bg-[#fdf8f2] ${
-                          isToday ? "bg-[#fffef8]" : isPast ? "opacity-70" : ""
-                        }`}
-                      >
-                        <td className="px-4 py-2.5 whitespace-nowrap align-middle">
-                          {showDate ? (
-                            <div className="flex items-center gap-1.5">
-                              <strong className="text-sm">{dateLabel}</strong>
-                              {isToday && (
-                                <span className="px-1.5 py-0.5 bg-[#d4a847] text-white text-[10px] font-bold rounded">
-                                  TODAY
-                                </span>
-                              )}
-                            </div>
-                          ) : null}
-                        </td>
-                        <td className="px-3 py-2.5 align-middle">
-                          <Badge contentType={slot.t} />
-                        </td>
-                        <td className="px-3 py-2.5 align-middle text-sm font-medium">
-                          {slot.a}
-                        </td>
-                        <td className="px-3 py-2.5 align-middle max-w-[200px]">
-                          <span className="block truncate text-xs text-gray-600">
-                            {slot.tp}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 align-middle text-sm whitespace-nowrap">
-                          {fmt12h(slot.tm)} ET
-                        </td>
-                        <td className="px-3 py-2.5 align-middle text-sm">
-                          {fmt$(slot.rv)}
-                        </td>
-                        <td className="px-3 py-2.5 align-middle text-sm">
-                          {actualNode}
-                        </td>
-                        <td className="px-3 py-2.5 align-middle">
-                          <Badge status={slot.status} />
-                        </td>
-                        <td className="px-3 py-2.5 align-middle">
-                          <div className="flex items-center gap-1.5">
-                            {(slot.status === "failed" || slot.status === "blocked") &&
-                              slot.exec_id && (
-                                <button
-                                  onClick={() =>
-                                    apiPost(`/api/retry-slot?id=${slot.exec_id}`).then(
-                                      () => mutate()
-                                    )
-                                  }
-                                  className="text-[11px] border border-[#c0392b] text-[#c0392b] px-1.5 py-0.5 rounded hover:bg-[#c0392b] hover:text-white transition-colors"
-                                >
-                                  ↺ Retry
-                                </button>
-                              )}
-                            {slot.kid && (
-                              <a
-                                href={`https://www.klaviyo.com/campaign/${slot.kid}/edit`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-[11px] text-gray-400 hover:text-[#8b4513]"
-                              >
-                                ↗
-                              </a>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  });
-                })()
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
+      <Drawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        title={editing ? "Edit slot" : "New slot"}
+        sub={
+          editing
+            ? `${ctLabel(editing.t)} · ${audLabel(editing.a)}`
+            : "Add a slot to this month's calendar"
+        }
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setDrawerOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="primary" loading={saving} onClick={save}>
+              Save
+            </Button>
+          </>
+        }
+      >
+        <Field label="Date">
+          <TextInput
+            type="date"
+            value={form.date}
+            onChange={(e) => patch("date", e.target.value)}
+          />
+        </Field>
+        <Field label="Content type">
+          <Select
+            options={CT_OPTIONS}
+            value={form.content_type}
+            onChange={(e) =>
+              patch("content_type", e.target.value as ContentType)
+            }
+          />
+        </Field>
+        <Field label="Audience" hint="Internal segment key, e.g. lapsed_30d">
+          <TextInput
+            value={form.audience}
+            onChange={(e) => patch("audience", e.target.value)}
+            placeholder="lapsed_30d"
+          />
+        </Field>
+        <Field label="Topic angle">
+          <TextInput
+            value={form.topic_angle}
+            onChange={(e) => patch("topic_angle", e.target.value)}
+            placeholder="Sleep science: why 50+ women wake at 3am"
+          />
+        </Field>
+        <Field label="Send time (ET)">
+          <TextInput
+            value={form.send_time_est}
+            onChange={(e) => patch("send_time_est", e.target.value)}
+            placeholder="14:00"
+          />
+        </Field>
+        <Field label="Revenue estimate">
+          <TextInput
+            type="number"
+            value={form.revenue_estimate}
+            onChange={(e) => patch("revenue_estimate", e.target.value)}
+            placeholder="315"
+          />
+        </Field>
+        <Field label="Priority">
+          <Select
+            options={PRIORITY_OPTIONS}
+            value={form.priority}
+            onChange={(e) => patch("priority", e.target.value)}
+          />
+        </Field>
+        <Field label="Rationale">
+          <TextInput
+            value={form.rationale}
+            onChange={(e) => patch("rationale", e.target.value)}
+            placeholder="Why this slot, this audience, now"
+          />
+        </Field>
+      </Drawer>
+    </>
   );
 }

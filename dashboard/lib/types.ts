@@ -189,3 +189,44 @@ export interface SystemData {
   env_status: Record<string, boolean>;
   db_ok: boolean;
 }
+
+export interface StoreRevenue {
+  store_mtd: number;
+  order_count: number;
+  aov: number;
+  attributed: number;
+  campaign_rev: number;
+  flow_rev: number;
+  pct_attributed: number;
+  store_trend: RevenueTrend[];
+  goal: number;
+}
+
+export interface BusinessData {
+  store: StoreRevenue;
+  pacing: Pacing;
+}
+
+export interface PacingPoint {
+  date: string;
+  actual: number;
+  target: number;
+  gap_pct: number;
+  required_daily: number;
+}
+
+export interface PacingHistoryData {
+  history: PacingPoint[];
+}
+
+export interface Deliverability {
+  _source: string;
+  _checked_at?: string;
+  recipients?: number;
+  deliveries?: number;
+  bounce_rate?: number;
+  unsub_rate?: number;
+  delivery_rate?: number;
+  spam_rate?: number;
+  [k: string]: unknown;
+}

@@ -5,12 +5,12 @@
   "installCommand": "npm install",
   "outputDirectory": ".next",
   "env": {
-    "NEXT_PUBLIC_API_URL": "https://your-replit-app.replit.app"
+    "NEXT_PUBLIC_API_URL": "https://beezy-agents-ingestion.replit.app"
   },
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://your-replit-app.replit.app/api/:path*"
+      "destination": "https://beezy-agents-ingestion.replit.app/api/:path*"
     }
   ]
 }

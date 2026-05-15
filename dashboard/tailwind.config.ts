@@ -2,35 +2,69 @@ import type { Config } from "tailwindcss";
 
 const config: Config = {
   content: [
-    "./pages/**/*.{js,ts,jsx,tsx,mdx}",
-    "./components/**/*.{js,ts,jsx,tsx,mdx}",
-    "./app/**/*.{js,ts,jsx,tsx,mdx}",
+    "./app/**/*.{ts,tsx}",
+    "./components/**/*.{ts,tsx}",
+    "./lib/**/*.{ts,tsx}",
   ],
   theme: {
     extend: {
       colors: {
-        cream: "#faf6ee",
-        sidebar: "#1a1208",
-        primary: "#8b4513",
-        "primary-dark": "#6d3410",
-        accent: "#d4a847",
-        brown: "#2c2417",
-        border: "#e8dcc8",
-        muted: "#8b7355",
-        "success-green": "#1e7e34",
-        "warning-orange": "#e07b00",
-        "error-red": "#c0392b",
-        "blue-campaign": "#1a73e8",
-        "blue-sniper": "#1558b0",
-        "purple-hive": "#7b2d8b",
-        "green-seo": "#1e7e34",
-        "teal-audio": "#0e7c7b",
-        "orange-sms": "#e07b00",
-        "gray-flow": "#888888",
+        ink: {
+          DEFAULT: "#0f172a",
+          soft: "#334155",
+          muted: "#64748b",
+          faint: "#94a3b8",
+        },
+        line: "#e2e8f0",
+        line2: "#f1f5f9",
+        canvas: "#f8fafc",
+        accent: {
+          DEFAULT: "#4f46e5",
+          soft: "#eef2ff",
+          ring: "#c7d2fe",
+          ink: "#3730a3",
+        },
+        good: { DEFAULT: "#059669", soft: "#ecfdf5", ink: "#065f46" },
+        warn: { DEFAULT: "#d97706", soft: "#fffbeb", ink: "#92400e" },
+        bad: { DEFAULT: "#dc2626", soft: "#fef2f2", ink: "#991b1b" },
       },
       fontFamily: {
-        sans: ["var(--font-dm-sans)", "Inter", "sans-serif"],
-        serif: ["var(--font-dm-serif)", "Georgia", "serif"],
+        sans: [
+          "Inter",
+          "ui-sans-serif",
+          "system-ui",
+          "-apple-system",
+          "Segoe UI",
+          "sans-serif",
+        ],
+        mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+      },
+      fontSize: {
+        "2xs": ["0.6875rem", { lineHeight: "1rem" }],
+      },
+      boxShadow: {
+        card: "0 1px 2px 0 rgb(15 23 42 / 0.04), 0 1px 3px 0 rgb(15 23 42 / 0.05)",
+        cardhover:
+          "0 4px 6px -1px rgb(15 23 42 / 0.07), 0 2px 4px -2px rgb(15 23 42 / 0.06)",
+        pop: "0 16px 40px -12px rgb(15 23 42 / 0.28)",
+      },
+      borderRadius: {
+        xl: "0.875rem",
+        "2xl": "1.125rem",
+      },
+      keyframes: {
+        "fade-in": {
+          from: { opacity: "0", transform: "translateY(4px)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
+        "slide-in": {
+          from: { transform: "translateX(100%)" },
+          to: { transform: "translateX(0)" },
+        },
+      },
+      animation: {
+        "fade-in": "fade-in 0.25s ease-out",
+        "slide-in": "slide-in 0.22s cubic-bezier(0.16,1,0.3,1)",
       },
     },
   },

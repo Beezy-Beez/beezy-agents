@@ -657,6 +657,118 @@ def _learning_loop() -> dict:
     return result
 
 
+# ── Business / store-wide data (Shopify) ──────────────────────────────────────
+
+def _store_revenue() -> dict:
+    """
+    Store-wide revenue from Shopify orders (net, post-refund), MTD + 30d trend.
+    Deduped by order_id (latest row by measured_at), scoped by order created_at.
+    Live data only — no estimates (CLAUDE.md §0).
+    """
+    mtd_row = _q1(
+        """SELECT COALESCE(SUM(rev),0), COUNT(*) FROM (
+             SELECT DISTINCT ON (dimensions->>'order_id') metric_value AS rev
+             FROM performance
+             WHERE source='shopify' AND metric_name='order_revenue'
+               AND (dimensions->>'created_at')::timestamptz >= date_trunc('month', CURRENT_DATE)
+             ORDER BY dimensions->>'order_id', measured_at DESC
+           ) t"""
+    )
+    store_mtd = float(mtd_row[0]) if mtd_row else 0.0
+    order_count = int(mtd_row[1]) if mtd_row else 0
+    aov = store_mtd / order_count if order_count else 0.0
+
+    trend_rows = _q(
+        """SELECT day, SUM(rev) FROM (
+             SELECT DISTINCT ON (dimensions->>'order_id')
+                    (dimensions->>'created_at')::date AS day, metric_value AS rev
+             FROM performance
+             WHERE source='shopify' AND metric_name='order_revenue'
+               AND (dimensions->>'created_at')::timestamptz >= CURRENT_DATE - INTERVAL '30 days'
+             ORDER BY dimensions->>'order_id', measured_at DESC
+           ) t GROUP BY day ORDER BY day"""
+    )
+    store_trend = [{"date": str(r[0]), "revenue": round(float(r[1] or 0), 2)} for r in trend_rows]
+
+    # Email-attributed (Klaviyo) MTD from the pacing cache
+    p = _pacing()
+    attributed = p["rev"]
+    pct_attributed = (attributed / store_mtd * 100) if store_mtd else 0.0
+
+    return {
+        "store_mtd": round(store_mtd, 2),
+        "order_count": order_count,
+        "aov": round(aov, 2),
+        "attributed": round(attributed, 2),
+        "campaign_rev": round(p["cr"], 2),
+        "flow_rev": round(p["fr"], 2),
+        "pct_attributed": round(pct_attributed, 1),
+        "store_trend": store_trend,
+        "goal": MONTHLY_GOAL,
+    }
+
+
+def _pacing_history() -> list:
+    """Daily pacing snapshots — actual vs target trajectory for charting."""
+    rows = _q(
+        """SELECT measured_at::date, period_to_date_value, target_to_date_value,
+                  gap_pct, required_daily_rate
+           FROM pacing_state ORDER BY measured_at ASC LIMIT 90"""
+    )
+    return [{
+        "date": str(r[0]),
+        "actual": round(float(r[1] or 0), 2),
+        "target": round(float(r[2] or 0), 2),
+        "gap_pct": round(float(r[3] or 0), 2),
+        "required_daily": round(float(r[4] or 0), 2),
+    } for r in rows]
+
+
+def _deliverability() -> dict:
+    """
+    Latest deliverability posture. Prefers the deliverability_monitor strategy
+    row; falls back to a live 30-day aggregate from the performance table.
+    """
+    row = _q1(
+        "SELECT strategy_text, created_at FROM strategies "
+        "WHERE component='deliverability_monitor' ORDER BY created_at DESC LIMIT 1"
+    )
+    if row:
+        try:
+            d = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+            if isinstance(d, dict):
+                d["_checked_at"] = str(row[1])[:16] if row[1] else ""
+                d["_source"] = "monitor"
+                return d
+        except Exception:
+            pass
+
+    agg = _q1(
+        """SELECT
+             COALESCE(SUM(CASE WHEN metric_name='bounces'      THEN metric_value END),0),
+             COALESCE(SUM(CASE WHEN metric_name='unsubscribes' THEN metric_value END),0),
+             COALESCE(SUM(CASE WHEN metric_name='recipients'   THEN metric_value END),0),
+             COALESCE(SUM(CASE WHEN metric_name='deliveries'   THEN metric_value END),0)
+           FROM performance
+           WHERE source='klaviyo'
+             AND window_start >= CURRENT_DATE - INTERVAL '30 days'
+             AND metric_name IN ('bounces','unsubscribes','recipients','deliveries')"""
+    )
+    if not agg:
+        return {"_source": "none"}
+    bounces, unsubs, recipients, deliveries = (float(x or 0) for x in agg)
+    base = recipients or deliveries or 1
+    return {
+        "_source": "performance_30d",
+        "_checked_at": "",
+        "recipients": int(recipients),
+        "deliveries": int(deliveries),
+        "bounce_rate": round(bounces / base * 100, 3),
+        "unsub_rate": round(unsubs / base * 100, 3),
+        "delivery_rate": round(deliveries / base * 100, 2) if recipients else 0.0,
+    }
+
+
 # ── HTML section builders ─────────────────────────────────────────────────────
 
 _CT_COLORS = {

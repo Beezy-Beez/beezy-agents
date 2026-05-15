@@ -6,6 +6,7 @@ Single deployment handles everything.
 """
 import sys
 import os
+import json
 import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -966,5 +967,228 @@ async def api_run_learning_loop():
             return "ok"
         await loop.run_in_executor(None, _run)
         return JSONResponse({"status": "started"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── Extended read endpoints (business / trajectory / deliverability) ──────────
+
+@app.get("/api/data/business")
+def api_data_business():
+    """Store-wide Shopify revenue, AOV, attribution split, 30-day store trend."""
+    from app.dashboard import _store_revenue, _pacing
+    return JSONResponse({"store": _store_revenue(), "pacing": _pacing()})
+
+
+@app.get("/api/data/pacing-history")
+def api_data_pacing_history():
+    """Daily actual-vs-target pacing trajectory for charting."""
+    from app.dashboard import _pacing_history
+    return JSONResponse({"history": _pacing_history()})
+
+
+@app.get("/api/data/deliverability")
+def api_data_deliverability():
+    """Bounce / unsubscribe / delivery posture (monitor row or live 30d)."""
+    from app.dashboard import _deliverability
+    return JSONResponse(_deliverability())
+
+
+# ── Inline editing — calendar slots ───────────────────────────────────────────
+
+_SLOT_EDITABLE = {
+    "date", "content_type", "audience", "topic_angle", "send_time_est",
+    "priority", "revenue_estimate", "needs_page", "discount_code",
+    "discount_pct", "rationale",
+}
+
+
+def _load_plan(conn, month: str):
+    """Return (decision_id, payload_dict) for the latest calendar_plan of `month`."""
+    row = conn.execute(
+        "SELECT id, output FROM decisions WHERE decision_type='calendar_plan' "
+        "AND output->>'month'=%s ORDER BY created_at DESC LIMIT 1",
+        (month,),
+    ).fetchone()
+    if not row:
+        return None, None
+    payload = row[1] if isinstance(row[1], dict) else json.loads(row[1])
+    return str(row[0]), payload
+
+
+def _save_plan(conn, decision_id: str, payload: dict) -> None:
+    conn.execute(
+        "UPDATE decisions SET output=%s WHERE id=%s",
+        (json.dumps(payload), decision_id),
+    )
+    conn.commit()
+
+
+@app.post("/api/calendar/slot")
+async def api_calendar_slot_add(request: Request):
+    """Add a new slot to the month's calendar plan."""
+    body = await request.json()
+    slot = {k: v for k, v in body.items() if k in _SLOT_EDITABLE}
+    if not slot.get("date") or not slot.get("content_type") or not slot.get("audience"):
+        return JSONResponse({"error": "date, content_type and audience are required"}, status_code=400)
+    month = slot["date"][:7]
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            decision_id, payload = _load_plan(conn, month)
+            if not payload:
+                return JSONResponse({"error": f"no calendar plan exists for {month}"}, status_code=404)
+            slot.setdefault("revenue_estimate", 0)
+            payload.setdefault("slots", []).append(slot)
+            _save_plan(conn, decision_id, payload)
+        return JSONResponse({"status": "added", "slot": slot})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.patch("/api/calendar/slot")
+async def api_calendar_slot_edit(request: Request):
+    """Edit a slot. Body: {locator:{date,content_type,audience}, fields:{...}}."""
+    body = await request.json()
+    loc = body.get("locator") or {}
+    fields = {k: v for k, v in (body.get("fields") or {}).items() if k in _SLOT_EDITABLE}
+    if not loc.get("date") or not loc.get("content_type") or not loc.get("audience"):
+        return JSONResponse({"error": "locator requires date, content_type, audience"}, status_code=400)
+    if not fields:
+        return JSONResponse({"error": "no editable fields supplied"}, status_code=400)
+    month = loc["date"][:7]
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            decision_id, payload = _load_plan(conn, month)
+            if not payload:
+                return JSONResponse({"error": f"no calendar plan for {month}"}, status_code=404)
+            matched = False
+            for s in payload.get("slots", []):
+                if (s.get("date") == loc["date"]
+                        and s.get("content_type") == loc["content_type"]
+                        and s.get("audience") == loc["audience"]):
+                    s.update(fields)
+                    matched = True
+                    break
+            if not matched:
+                return JSONResponse({"error": "slot not found"}, status_code=404)
+            _save_plan(conn, decision_id, payload)
+        return JSONResponse({"status": "updated", "fields": fields})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/calendar/slot")
+async def api_calendar_slot_delete(request: Request):
+    """Remove a slot. Body: {date, content_type, audience}."""
+    body = await request.json()
+    d, ct, aud = body.get("date"), body.get("content_type"), body.get("audience")
+    if not d or not ct or not aud:
+        return JSONResponse({"error": "date, content_type, audience required"}, status_code=400)
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            decision_id, payload = _load_plan(conn, d[:7])
+            if not payload:
+                return JSONResponse({"error": "no calendar plan"}, status_code=404)
+            before = len(payload.get("slots", []))
+            payload["slots"] = [
+                s for s in payload.get("slots", [])
+                if not (s.get("date") == d and s.get("content_type") == ct
+                        and s.get("audience") == aud)
+            ]
+            if len(payload["slots"]) == before:
+                return JSONResponse({"error": "slot not found"}, status_code=404)
+            _save_plan(conn, decision_id, payload)
+        return JSONResponse({"status": "deleted"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── Inline editing — Hive Mind issues ─────────────────────────────────────────
+
+_ISSUE_EDITABLE = {
+    "subject_line", "subject_line_48h", "preview_text", "pillar",
+    "topic_summary", "scheduled_send_at", "status", "notes",
+}
+
+
+@app.patch("/api/content/issue")
+async def api_issue_edit(request: Request):
+    """Edit Hive Mind issue fields. Body: {number, fields:{...}}."""
+    body = await request.json()
+    number = body.get("number")
+    fields = {k: v for k, v in (body.get("fields") or {}).items() if k in _ISSUE_EDITABLE}
+    if number is None or not fields:
+        return JSONResponse({"error": "number and at least one editable field required"}, status_code=400)
+    sets = ", ".join(f"{k}=%s" for k in fields)
+    params = list(fields.values()) + [number]
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            conn.execute(f"UPDATE issues SET {sets} WHERE number=%s", params)
+            conn.commit()
+        return JSONResponse({"status": "updated", "number": number, "fields": fields})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── Inline editing — SEO topic queue ──────────────────────────────────────────
+
+@app.post("/api/content/seo-topic")
+async def api_seo_topic_add(request: Request):
+    """Queue a new SEO keyword. Body: {keyword}."""
+    body = await request.json()
+    keyword = (body.get("keyword") or "").strip()
+    if not keyword:
+        return JSONResponse({"error": "keyword required"}, status_code=400)
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO seo_topics (keyword, status, created_at) "
+                "VALUES (%s, 'pending', NOW())",
+                (keyword,),
+            )
+            conn.commit()
+        return JSONResponse({"status": "queued", "keyword": keyword})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.patch("/api/content/seo-topic")
+async def api_seo_topic_edit(request: Request):
+    """Update an SEO topic. Body: {keyword, status?}."""
+    body = await request.json()
+    keyword = (body.get("keyword") or "").strip()
+    status = body.get("status")
+    if not keyword or status not in ("pending", "published", "error"):
+        return JSONResponse({"error": "keyword and valid status required"}, status_code=400)
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE seo_topics SET status=%s WHERE keyword=%s", (status, keyword)
+            )
+            conn.commit()
+        return JSONResponse({"status": "updated", "keyword": keyword, "new_status": status})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/content/seo-topic")
+async def api_seo_topic_delete(request: Request):
+    """Remove an SEO topic. Body: {keyword}."""
+    body = await request.json()
+    keyword = (body.get("keyword") or "").strip()
+    if not keyword:
+        return JSONResponse({"error": "keyword required"}, status_code=400)
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            conn.execute("DELETE FROM seo_topics WHERE keyword=%s", (keyword,))
+            conn.commit()
+        return JSONResponse({"status": "deleted", "keyword": keyword})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

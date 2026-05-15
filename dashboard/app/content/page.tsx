@@ -1,377 +1,452 @@
 "use client";
 
-import useSWR from "swr";
-import { fetcher } from "@/lib/api";
-import type { ContentData, Issue, SeoTopic, Episode } from "@/lib/types";
 import { useState } from "react";
+import useSWR from "swr";
+import { Pencil, Mail, FileText, Search, Headphones } from "lucide-react";
+import { fetcher, apiPost, apiPatch, apiDelete } from "@/lib/api";
+import { fmtDate, statusTone } from "@/lib/format";
+import type { ContentData, Issue, SeoTopic, Episode } from "@/lib/types";
+import { Card, CardHeader } from "@/components/Card";
+import PageHeader from "@/components/PageHeader";
+import StatCard from "@/components/StatCard";
+import Badge from "@/components/Badge";
+import Button from "@/components/Button";
+import ActionButton from "@/components/ActionButton";
+import DataTable, { type Column } from "@/components/DataTable";
+import Drawer from "@/components/Drawer";
+import { Field, TextInput, Select } from "@/components/Field";
+import { ErrorState, PageSkeleton } from "@/components/States";
+import { useToast } from "@/components/Toast";
 
-const ISSUE_STATUS_CONFIG = {
-  draft:     { label: "Draft",     bg: "#888" },
-  scheduled: { label: "Scheduled", bg: "#1a73e8" },
-  published: { label: "Published", bg: "#1e7e34" },
-};
+const REFRESH = 30_000;
 
-const SEO_STATUS_CONFIG = {
-  pending:   { label: "Pending",   bg: "#e07b00" },
-  published: { label: "Published", bg: "#1e7e34" },
-  error:     { label: "Error",     bg: "#c0392b" },
-};
+const PILLAR_OPTIONS = [
+  { value: "Signal", label: "Signal" },
+  { value: "Surrender", label: "Surrender" },
+  { value: "Renewal", label: "Renewal" },
+];
 
-const PILLAR_CONFIG: Record<string, string> = {
-  Signal:    "#7b2d8b",
-  Surrender: "#0e7c7b",
-  Renewal:   "#1a73e8",
-};
+const STATUS_OPTIONS = [
+  { value: "draft", label: "Draft" },
+  { value: "scheduled", label: "Scheduled" },
+  { value: "published", label: "Published" },
+];
 
-const TABS = ["Hive Mind", "SEO Topics", "Episodes"] as const;
-type Tab = typeof TABS[number];
-
-function IssueRow({ issue }: { issue: Issue }) {
-  const s = ISSUE_STATUS_CONFIG[issue.status] ?? { label: issue.status, bg: "#888" };
-  const pillarColor = PILLAR_CONFIG[issue.pillar] ?? "#8b7355";
-  return (
-    <tr className="border-b border-[#f0ece4] last:border-0 hover:bg-[#fdf8f2] transition-colors">
-      <td className="px-4 py-3 font-bold text-sm text-[#8b4513]">
-        #{issue.number.toString().padStart(3, "0")}
-      </td>
-      <td className="px-3 py-3 text-sm max-w-[240px]">
-        <span className="block truncate font-medium">{issue.subject_line}</span>
-      </td>
-      <td className="px-3 py-3">
-        <span
-          className="inline-block px-2 py-0.5 rounded-full text-white text-[11px] font-semibold"
-          style={{ background: pillarColor }}
-        >
-          {issue.pillar}
-        </span>
-      </td>
-      <td className="px-3 py-3">
-        <span
-          className="inline-block px-2 py-0.5 rounded-full text-white text-[11px] font-semibold"
-          style={{ background: s.bg }}
-        >
-          {s.label}
-        </span>
-      </td>
-      <td className="px-3 py-3 text-sm text-gray-500">
-        {issue.scheduled || issue.published || "—"}
-      </td>
-      <td className="px-3 py-3">
-        <div className="flex items-center gap-2">
-          {issue.page_url && (
-            <a
-              href={issue.page_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs text-[#8b4513] hover:underline"
-            >
-              Page ↗
-            </a>
-          )}
-          {issue.campaign_id && (
-            <a
-              href={`https://www.klaviyo.com/campaign/${issue.campaign_id}/edit`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs text-gray-400 hover:text-[#8b4513]"
-            >
-              Klaviyo ↗
-            </a>
-          )}
-        </div>
-      </td>
-    </tr>
-  );
+interface IssueForm {
+  subject_line: string;
+  pillar: string;
+  status: string;
+  scheduled_send_at: string;
+  notes: string;
 }
 
-function SeoRow({ topic }: { topic: SeoTopic }) {
-  const s = SEO_STATUS_CONFIG[topic.status] ?? { label: topic.status, bg: "#888" };
-  return (
-    <tr className="border-b border-[#f0ece4] last:border-0 hover:bg-[#fdf8f2] transition-colors">
-      <td className="px-4 py-3 text-sm font-medium max-w-[280px]">
-        <span className="block truncate">{topic.keyword}</span>
-      </td>
-      <td className="px-3 py-3">
-        <span
-          className="inline-block px-2 py-0.5 rounded-full text-white text-[11px] font-semibold"
-          style={{ background: s.bg }}
-        >
-          {s.label}
-        </span>
-      </td>
-      <td className="px-3 py-3 text-sm">
-        {topic.url ? (
-          <a
-            href={topic.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[#8b4513] hover:underline text-xs"
-          >
-            View ↗
-          </a>
-        ) : topic.error ? (
-          <span className="text-xs text-[#c0392b]" title={topic.error}>
-            Error
-          </span>
-        ) : (
-          <span className="text-xs text-gray-400">—</span>
-        )}
-      </td>
-      <td className="px-3 py-3 text-xs text-gray-400">{topic.created}</td>
-    </tr>
+const isDateLike = (s: string): boolean => /^\d{4}-\d{2}-\d{2}/.test(s);
+
+export default function Content() {
+  const { toast } = useToast();
+  const { data, error, mutate } = useSWR<ContentData>(
+    "/api/data/content",
+    fetcher,
+    { refreshInterval: REFRESH }
   );
-}
 
-function EpisodeRow({ episode }: { episode: Episode }) {
-  const typeLabel = episode.type
-    ?.split("_")
-    .map((w) => w[0].toUpperCase() + w.slice(1))
-    .join(" ") ?? episode.type;
-
-  return (
-    <tr className="border-b border-[#f0ece4] last:border-0 hover:bg-[#fdf8f2] transition-colors">
-      <td className="px-4 py-3 text-sm font-medium max-w-[240px]">
-        <span className="block truncate">{episode.title}</span>
-      </td>
-      <td className="px-3 py-3">
-        <span className="inline-block px-2 py-0.5 rounded-full bg-[#0e7c7b] text-white text-[11px] font-semibold">
-          {typeLabel}
-        </span>
-      </td>
-      <td className="px-3 py-3 text-sm text-gray-500">
-        {episode.duration ? `${episode.duration}min` : "—"}
-      </td>
-      <td className="px-3 py-3 text-xs text-gray-400">{episode.deployed || "—"}</td>
-      <td className="px-3 py-3">
-        <div className="flex items-center gap-2">
-          {episode.url && (
-            <a
-              href={episode.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs text-[#8b4513] hover:underline"
-            >
-              Page ↗
-            </a>
-          )}
-          {episode.campaign_a && (
-            <a
-              href={`https://www.klaviyo.com/campaign/${episode.campaign_a}/edit`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs text-gray-400 hover:text-[#8b4513]"
-            >
-              Klaviyo ↗
-            </a>
-          )}
-        </div>
-      </td>
-    </tr>
-  );
-}
-
-export default function ContentPage() {
-  const { data, error } = useSWR<ContentData>("/api/data/content", fetcher, {
-    refreshInterval: 30_000,
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [editing, setEditing] = useState<Issue | null>(null);
+  const [form, setForm] = useState<IssueForm>({
+    subject_line: "",
+    pillar: "Signal",
+    status: "draft",
+    scheduled_send_at: "",
+    notes: "",
   });
-  const [tab, setTab] = useState<Tab>("Hive Mind");
+  const [saving, setSaving] = useState(false);
+  const [newKeyword, setNewKeyword] = useState("");
 
-  if (error) {
-    return (
-      <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-700">
-        Failed to load content data: {error.message}
-      </div>
-    );
-  }
-
-  if (!data) {
-    return (
-      <div className="space-y-4">
-        <div className="skeleton h-10 w-64 rounded-xl" />
-        <div className="skeleton h-12 w-full rounded-xl" />
-        <div className="skeleton h-[400px] w-full rounded-xl" />
-      </div>
-    );
-  }
+  if (error) return <ErrorState msg="backend unreachable" />;
+  if (!data) return <PageSkeleton />;
 
   const { issues, seo_topics, episodes } = data;
 
-  const tabCounts: Record<Tab, number> = {
-    "Hive Mind": issues.length,
-    "SEO Topics": seo_topics.length,
-    Episodes: episodes.length,
-  };
+  const published = issues.filter((i) => i.status === "published").length;
+  const queued = seo_topics.filter((s) => s.status === "pending").length;
+
+  function openEdit(issue: Issue) {
+    setEditing(issue);
+    setForm({
+      subject_line: issue.subject_line || "",
+      pillar: issue.pillar || "Signal",
+      status: issue.status || "draft",
+      scheduled_send_at:
+        issue.scheduled && isDateLike(issue.scheduled)
+          ? issue.scheduled.slice(0, 10)
+          : "",
+      notes: "",
+    });
+    setDrawerOpen(true);
+  }
+
+  function patch<K extends keyof IssueForm>(key: K, value: IssueForm[K]) {
+    setForm((f) => ({ ...f, [key]: value }));
+  }
+
+  async function save() {
+    if (!editing) return;
+    setSaving(true);
+    try {
+      await apiPatch("/api/content/issue", {
+        number: editing.number,
+        fields: {
+          subject_line: form.subject_line,
+          pillar: form.pillar,
+          status: form.status,
+          scheduled_send_at: form.scheduled_send_at,
+          notes: form.notes,
+        },
+      });
+      toast("Saved", "success");
+      mutate();
+      setDrawerOpen(false);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addKeyword() {
+    const kw = newKeyword.trim();
+    if (!kw) return;
+    try {
+      await apiPost("/api/content/seo-topic", { keyword: kw });
+      setNewKeyword("");
+      mutate();
+      toast("Keyword queued", "success");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
+
+  const issueColumns: Column<Issue>[] = [
+    {
+      header: "#",
+      className: "whitespace-nowrap text-ink font-medium tabular-nums",
+      render: (r) => r.number,
+    },
+    {
+      header: "Subject",
+      render: (r) => (
+        <span
+          className="block max-w-[22rem] truncate text-ink-soft"
+          title={r.subject_line || ""}
+        >
+          {r.subject_line || "—"}
+        </span>
+      ),
+    },
+    {
+      header: "Pillar",
+      render: (r) => <Badge tone="accent">{r.pillar}</Badge>,
+    },
+    {
+      header: "Status",
+      render: (r) => (
+        <Badge tone={statusTone(r.status)} dot>
+          {r.status}
+        </Badge>
+      ),
+    },
+    {
+      header: "Scheduled",
+      className: "whitespace-nowrap tabular-nums",
+      render: (r) => fmtDate(r.scheduled),
+    },
+    {
+      header: "Published",
+      className: "whitespace-nowrap tabular-nums",
+      render: (r) => (r.published ? fmtDate(r.published) : "—"),
+    },
+    {
+      header: "Links",
+      className: "whitespace-nowrap",
+      render: (r) =>
+        r.page_url ? (
+          <a
+            href={r.page_url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-accent hover:text-accent-ink text-xs font-medium"
+          >
+            Page ↗
+          </a>
+        ) : (
+          "—"
+        ),
+    },
+    {
+      header: "",
+      headerClassName: "w-px",
+      className: "whitespace-nowrap",
+      render: (r) => (
+        <div className="flex items-center justify-end">
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<Pencil size={13} />}
+            onClick={() => openEdit(r)}
+            aria-label="Edit issue"
+          />
+        </div>
+      ),
+    },
+  ];
+
+  const seoColumns: Column<SeoTopic>[] = [
+    {
+      header: "Keyword",
+      className: "text-ink font-medium",
+      render: (r) => r.keyword,
+    },
+    {
+      header: "Status",
+      render: (r) => <Badge tone={statusTone(r.status)}>{r.status}</Badge>,
+    },
+    {
+      header: "URL",
+      className: "whitespace-nowrap",
+      render: (r) =>
+        r.url ? (
+          <a
+            href={r.url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-accent hover:text-accent-ink text-xs font-medium"
+          >
+            View ↗
+          </a>
+        ) : (
+          "—"
+        ),
+    },
+    {
+      header: "Created",
+      className: "whitespace-nowrap tabular-nums",
+      render: (r) => fmtDate(r.created),
+    },
+    {
+      header: "",
+      headerClassName: "w-px",
+      className: "whitespace-nowrap",
+      render: (r) => (
+        <div className="flex items-center justify-end gap-1.5">
+          {r.status !== "published" && (
+            <ActionButton
+              label="Mark published"
+              size="sm"
+              run={() =>
+                apiPatch("/api/content/seo-topic", {
+                  keyword: r.keyword,
+                  status: "published",
+                })
+              }
+              okMsg="Marked published"
+              onDone={() => mutate()}
+            />
+          )}
+          {r.status !== "pending" && (
+            <ActionButton
+              label="Reset"
+              size="sm"
+              run={() =>
+                apiPatch("/api/content/seo-topic", {
+                  keyword: r.keyword,
+                  status: "pending",
+                })
+              }
+              okMsg="Reset to pending"
+              onDone={() => mutate()}
+            />
+          )}
+          <ActionButton
+            label="Delete"
+            variant="danger"
+            size="sm"
+            confirm="Remove this keyword?"
+            run={() =>
+              apiDelete("/api/content/seo-topic", { keyword: r.keyword })
+            }
+            okMsg="Keyword removed"
+            onDone={() => mutate()}
+          />
+        </div>
+      ),
+    },
+  ];
+
+  const episodeColumns: Column<Episode>[] = [
+    {
+      header: "Title",
+      render: (r) => (
+        <span
+          className="block max-w-[24rem] truncate text-ink"
+          title={r.title || ""}
+        >
+          {r.title || "—"}
+        </span>
+      ),
+    },
+    {
+      header: "Type",
+      render: (r) => <Badge tone="muted">{r.type}</Badge>,
+    },
+    {
+      header: "Duration",
+      className: "whitespace-nowrap tabular-nums",
+      render: (r) => `${r.duration}m`,
+    },
+    {
+      header: "Deployed",
+      className: "whitespace-nowrap tabular-nums",
+      render: (r) => fmtDate(r.deployed),
+    },
+    {
+      header: "Campaign",
+      className: "whitespace-nowrap text-ink-soft",
+      render: (r) => r.campaign_a ?? "—",
+    },
+  ];
 
   return (
-    <div className="space-y-5">
-      <h1
-        className="text-2xl font-bold text-[#8b4513]"
-        style={{ fontFamily: "var(--font-dm-serif)" }}
-      >
-        Content
-      </h1>
+    <>
+      <PageHeader
+        title="Content"
+        sub="Hive Mind newsletter, SEO queue & sleep-audio episodes"
+      />
 
-      {/* Tabs */}
-      <div className="flex gap-1 bg-[#f0ece4] p-1 rounded-xl w-fit">
-        {TABS.map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`px-5 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              tab === t
-                ? "bg-white text-[#8b4513] shadow-sm"
-                : "text-[#8b7355] hover:text-[#2c2417]"
-            }`}
-          >
-            {t}
-            <span
-              className={`ml-1.5 text-[11px] px-1.5 py-0.5 rounded-full ${
-                tab === t ? "bg-[#faf6ee] text-[#8b4513]" : "bg-white/50 text-gray-500"
-              }`}
-            >
-              {tabCounts[t]}
-            </span>
-          </button>
-        ))}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+        <StatCard
+          label="Hive Mind issues"
+          value={issues.length}
+          icon={<Mail size={15} />}
+        />
+        <StatCard
+          label="Published"
+          value={published}
+          icon={<FileText size={15} />}
+          sub="issues live"
+        />
+        <StatCard
+          label="SEO queued"
+          value={queued}
+          icon={<Search size={15} />}
+          sub="pending articles"
+        />
+        <StatCard
+          label="Episodes"
+          value={episodes.length}
+          icon={<Headphones size={15} />}
+        />
       </div>
 
-      {/* Hive Mind tab */}
-      {tab === "Hive Mind" && (
-        <div className="bg-white rounded-xl border border-[#e8dcc8] shadow-sm overflow-hidden">
-          <div className="px-5 py-4 border-b border-[#e8dcc8] flex items-center justify-between">
-            <h2 className="text-[11px] font-semibold uppercase tracking-widest text-[#8b7355]">
-              Hive Mind Issues
-            </h2>
-            <span className="text-xs text-gray-400">3-pillar newsletter · every 3 days</span>
-          </div>
-          {issues.length === 0 ? (
-            <div className="p-8 text-center text-gray-400 italic text-sm">
-              No issues found.
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm border-collapse">
-                <thead>
-                  <tr className="border-b-2 border-[#e8dcc8]">
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-4 py-3">
-                      #
-                    </th>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                      Subject
-                    </th>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                      Pillar
-                    </th>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                      Status
-                    </th>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                      Date
-                    </th>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                      Links
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {issues.map((issue) => (
-                    <IssueRow key={issue.number} issue={issue} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
+      <Card className="mb-5">
+        <CardHeader
+          title="Hive Mind issues"
+          sub={`${issues.length} issue${issues.length === 1 ? "" : "s"}`}
+        />
+        <DataTable<Issue>
+          columns={issueColumns}
+          rows={issues}
+          emptyMessage="No Hive Mind issues yet."
+        />
+      </Card>
 
-      {/* SEO Topics tab */}
-      {tab === "SEO Topics" && (
-        <div className="bg-white rounded-xl border border-[#e8dcc8] shadow-sm overflow-hidden">
-          <div className="px-5 py-4 border-b border-[#e8dcc8] flex items-center justify-between">
-            <h2 className="text-[11px] font-semibold uppercase tracking-widest text-[#8b7355]">
-              SEO Topic Queue
-            </h2>
-            <span className="text-xs text-gray-400">2,000-word articles · Tier 1 auto</span>
-          </div>
-          {seo_topics.length === 0 ? (
-            <div className="p-8 text-center text-gray-400 italic text-sm">
-              No SEO topics in queue.
+      <Card className="mb-5">
+        <CardHeader
+          title="SEO topics"
+          sub={`${queued} pending`}
+          action={
+            <div className="flex items-center gap-2">
+              <TextInput
+                value={newKeyword}
+                onChange={(e) => setNewKeyword(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") addKeyword();
+                }}
+                placeholder="New keyword…"
+              />
+              <Button variant="primary" size="sm" onClick={addKeyword}>
+                Add
+              </Button>
             </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm border-collapse">
-                <thead>
-                  <tr className="border-b-2 border-[#e8dcc8]">
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-4 py-3">
-                      Keyword
-                    </th>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                      Status
-                    </th>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                      Published URL
-                    </th>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                      Created
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {seo_topics.map((topic, i) => (
-                    <SeoRow key={i} topic={topic} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
+          }
+        />
+        <DataTable<SeoTopic>
+          columns={seoColumns}
+          rows={seo_topics}
+          emptyMessage="No SEO topics queued."
+        />
+      </Card>
 
-      {/* Episodes tab */}
-      {tab === "Episodes" && (
-        <div className="bg-white rounded-xl border border-[#e8dcc8] shadow-sm overflow-hidden">
-          <div className="px-5 py-4 border-b border-[#e8dcc8] flex items-center justify-between">
-            <h2 className="text-[11px] font-semibold uppercase tracking-widest text-[#8b7355]">
-              Sleep Audio Episodes
-            </h2>
-            <span className="text-xs text-gray-400">Deep Bear Sleep · every 3 days</span>
-          </div>
-          {episodes.length === 0 ? (
-            <div className="p-8 text-center text-gray-400 italic text-sm">
-              No episodes deployed yet.
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm border-collapse">
-                <thead>
-                  <tr className="border-b-2 border-[#e8dcc8]">
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-4 py-3">
-                      Title
-                    </th>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                      Type
-                    </th>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                      Duration
-                    </th>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                      Deployed
-                    </th>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                      Links
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {episodes.map((ep, i) => (
-                    <EpisodeRow key={i} episode={ep} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+      <Card>
+        <CardHeader title="Episodes" sub={`${episodes.length} deployed`} />
+        <DataTable<Episode>
+          columns={episodeColumns}
+          rows={episodes}
+          emptyMessage="No episodes deployed yet."
+        />
+      </Card>
+
+      <Drawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        title={editing ? `Edit issue #${editing.number}` : "Edit issue"}
+        sub={editing ? editing.subject_line || undefined : undefined}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setDrawerOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="primary" loading={saving} onClick={save}>
+              Save
+            </Button>
+          </>
+        }
+      >
+        <Field label="Subject line">
+          <TextInput
+            value={form.subject_line}
+            onChange={(e) => patch("subject_line", e.target.value)}
+            placeholder="Newsletter subject line"
+          />
+        </Field>
+        <Field label="Pillar">
+          <Select
+            options={PILLAR_OPTIONS}
+            value={form.pillar}
+            onChange={(e) => patch("pillar", e.target.value)}
+          />
+        </Field>
+        <Field label="Status">
+          <Select
+            options={STATUS_OPTIONS}
+            value={form.status}
+            onChange={(e) => patch("status", e.target.value)}
+          />
+        </Field>
+        <Field label="Scheduled send at">
+          <TextInput
+            type="date"
+            value={form.scheduled_send_at}
+            onChange={(e) => patch("scheduled_send_at", e.target.value)}
+          />
+        </Field>
+        <Field label="Notes">
+          <TextInput
+            value={form.notes}
+            onChange={(e) => patch("notes", e.target.value)}
+            placeholder="Internal notes"
+          />
+        </Field>
+      </Drawer>
+    </>
   );
 }

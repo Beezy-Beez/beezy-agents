@@ -1,231 +1,210 @@
 "use client";
 
 import useSWR from "swr";
+import { RefreshCw, Users, DollarSign, Sparkles, Flame } from "lucide-react";
 import { fetcher, apiPost } from "@/lib/api";
+import { rpr, num, fmtDate, audLabel } from "@/lib/format";
 import type { AudiencesData, AudienceHealth } from "@/lib/types";
-import { useState } from "react";
+import { Card, CardHeader } from "@/components/Card";
+import StatCard from "@/components/StatCard";
+import Badge from "@/components/Badge";
+import PageHeader from "@/components/PageHeader";
+import ActionButton from "@/components/ActionButton";
+import DataTable from "@/components/DataTable";
+import type { Column } from "@/components/DataTable";
+import { HBars } from "@/components/charts";
+import { EmptyState, PageSkeleton, ErrorState } from "@/components/States";
 
-const HEALTH_CONFIG = {
-  FRESH:  { label: "FRESH",    bg: "#1e7e34", text: "No recent send" },
-  WARM:   { label: "WARM",     bg: "#e07b00", text: "Sent 7–14d ago" },
-  RECENT: { label: "COOLDOWN", bg: "#c0392b", text: "Sent < 7d ago" },
-};
+const REFRESH = 30_000;
 
-function RPRTrend({ rpr30, rpr90 }: { rpr30: number; rpr90: number }) {
-  if (!rpr30 || !rpr90) return null;
-  if (rpr30 > rpr90 * 1.05) return <span className="text-[#1e7e34] font-bold">↑</span>;
-  if (rpr30 < rpr90 * 0.9) return <span className="text-[#c0392b] font-bold">↓</span>;
-  return <span className="text-gray-400">→</span>;
-}
+type HealthLevel = AudienceHealth["health"];
 
-function HealthRow({ row, onRefresh }: { row: AudienceHealth; onRefresh: () => void }) {
-  const h = HEALTH_CONFIG[row.health] ?? { label: row.health, bg: "#888", text: "" };
-  return (
-    <tr className="border-b border-[#f0ece4] last:border-0 hover:bg-[#fdf8f2] transition-colors">
-      <td className="px-4 py-3 font-semibold text-sm">{row.audience}</td>
-      <td className="px-3 py-3 text-sm text-gray-600">{row.last_send}</td>
-      <td className="px-3 py-3 text-sm text-gray-500">{row.days_since}d ago</td>
-      <td className="px-3 py-3 text-sm">
-        <span className="font-semibold">${row.rpr_90d.toFixed(3)}</span>{" "}
-        <RPRTrend rpr30={row.rpr_30d} rpr90={row.rpr_90d} />
-      </td>
-      <td className="px-3 py-3 text-sm text-center">{row.sends_90d}</td>
-      <td className="px-3 py-3">
-        <span
-          className="inline-block px-2 py-0.5 rounded-full text-white text-[11px] font-semibold"
-          style={{ background: h.bg }}
-          title={h.text}
-        >
-          {h.label}
-        </span>
-      </td>
-    </tr>
-  );
-}
+const healthTone = (h: HealthLevel): "good" | "warn" | "muted" =>
+  h === "RECENT" ? "good" : h === "WARM" ? "warn" : "muted";
 
-export default function AudiencesPage() {
-  const { data, error, mutate } = useSWR<AudiencesData>("/api/data/audiences", fetcher, {
-    refreshInterval: 30_000,
+export default function Audiences() {
+  const aud = useSWR<AudiencesData>("/api/data/audiences", fetcher, {
+    refreshInterval: REFRESH,
   });
-  const [burnInput, setBurnInput] = useState("");
-  const [burnMsg, setBurnMsg] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
 
-  if (error) {
-    return (
-      <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-700">
-        Failed to load audience data: {error.message}
-      </div>
-    );
-  }
+  if (aud.error) return <ErrorState msg="backend unreachable" />;
+  if (!aud.data) return <PageSkeleton />;
 
-  if (!data) {
-    return (
-      <div className="space-y-4">
-        <div className="skeleton h-10 w-64 rounded-xl" />
-        <div className="skeleton h-[400px] w-full rounded-xl" />
-      </div>
-    );
-  }
+  const { health, burn_list } = aud.data;
+  const burned = new Set(burn_list);
 
-  const { health, burn_list } = data;
+  const sorted = [...health].sort((a, b) => b.rpr_90d - a.rpr_90d);
 
-  const handleRefresh = async () => {
-    setRefreshing(true);
-    try {
-      await apiPost("/api/refresh-audience-health");
-      await mutate();
-    } finally {
-      setRefreshing(false);
-    }
-  };
+  const withRpr = health.filter((h) => h.rpr_90d > 0);
+  const avgRpr =
+    withRpr.length > 0
+      ? withRpr.reduce((s, h) => s + h.rpr_90d, 0) / withRpr.length
+      : 0;
+  const freshest =
+    health.length > 0 ? Math.min(...health.map((h) => h.days_since)) : null;
 
-  const handleBurn = async () => {
-    const aud = burnInput.trim();
-    if (!aud) return;
-    try {
-      await apiPost(`/api/burn-audience?audience=${encodeURIComponent(aud)}`);
-      setBurnMsg(`Burned: ${aud}`);
-      setBurnInput("");
-      mutate();
-    } catch (e: unknown) {
-      setBurnMsg(e instanceof Error ? e.message : "Error");
-    }
-    setTimeout(() => setBurnMsg(null), 4000);
-  };
+  const barData = withRpr
+    .slice()
+    .sort((a, b) => b.rpr_90d - a.rpr_90d)
+    .slice(0, 12)
+    .map((h) => ({ name: audLabel(h.audience), value: h.rpr_90d }));
 
-  const handleUnburn = async (aud: string) => {
-    await apiPost(`/api/unburn-audience?audience=${encodeURIComponent(aud)}`);
-    mutate();
-  };
+  const columns: Column<AudienceHealth>[] = [
+    {
+      header: "Audience",
+      render: (r) => (
+        <span className="inline-flex items-center gap-2">
+          <span className="font-medium text-ink">{audLabel(r.audience)}</span>
+          {burned.has(r.audience) && <Badge tone="bad">Burned</Badge>}
+        </span>
+      ),
+    },
+    {
+      header: "Last send",
+      render: (r) => fmtDate(r.last_send),
+      className: "text-ink-soft tabular-nums",
+    },
+    {
+      header: "Days since",
+      render: (r) => num(r.days_since),
+      className: "text-ink-soft tabular-nums",
+    },
+    {
+      header: "90d RPR",
+      render: (r) => (
+        <span className="text-ink font-medium tabular-nums">
+          {rpr(r.rpr_90d)}
+        </span>
+      ),
+    },
+    {
+      header: "30d RPR",
+      render: (r) => rpr(r.rpr_30d),
+      className: "text-ink-soft tabular-nums",
+    },
+    {
+      header: "Sends 90d",
+      render: (r) => num(r.sends_90d),
+      className: "text-ink-soft tabular-nums",
+    },
+    {
+      header: "Health",
+      render: (r) => (
+        <Badge tone={healthTone(r.health)} dot>
+          {r.health}
+        </Badge>
+      ),
+    },
+    {
+      header: "",
+      headerClassName: "text-right",
+      className: "text-right",
+      render: (r) =>
+        burned.has(r.audience) ? (
+          <ActionButton
+            label="Unburn"
+            size="sm"
+            run={() =>
+              apiPost(
+                `/api/unburn-audience?audience=${encodeURIComponent(
+                  r.audience
+                )}`
+              )
+            }
+            okMsg={`${audLabel(r.audience)} unburned`}
+            onDone={() => aud.mutate()}
+          />
+        ) : (
+          <ActionButton
+            label="Burn"
+            size="sm"
+            variant="danger"
+            confirm="Burn this audience? It will be blocked by validator R5."
+            run={() =>
+              apiPost(
+                `/api/burn-audience?audience=${encodeURIComponent(r.audience)}`
+              )
+            }
+            okMsg={`${audLabel(r.audience)} burned`}
+            onDone={() => aud.mutate()}
+          />
+        ),
+    },
+  ];
 
   return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <h1
-          className="text-2xl font-bold text-[#8b4513]"
-          style={{ fontFamily: "var(--font-dm-serif)" }}
-        >
-          Audiences
-        </h1>
-        <button
-          onClick={handleRefresh}
-          disabled={refreshing}
-          className="px-4 py-2 bg-white border border-[#e8dcc8] text-[#2c2417] rounded-lg text-sm font-medium hover:border-[#8b4513] transition-colors disabled:opacity-60"
-        >
-          {refreshing ? "Pulling from Klaviyo…" : "Refresh from Klaviyo"}
-        </button>
-      </div>
-
-      {/* Audience health */}
-      <div className="bg-white rounded-xl border border-[#e8dcc8] shadow-sm overflow-hidden">
-        <div className="px-5 py-4 border-b border-[#e8dcc8]">
-          <h2 className="text-[11px] font-semibold uppercase tracking-widest text-[#8b7355]">
-            Audience Health
-          </h2>
-        </div>
-
-        {health.length === 0 ? (
-          <div className="p-8 text-center">
-            <p className="text-gray-400 italic text-sm mb-4">
-              No audience data cached yet.
-            </p>
-            <p className="text-xs text-gray-400 mb-4">
-              Loads from Klaviyo history — 90-day RPR per audience.
-            </p>
-            <button
-              onClick={handleRefresh}
-              disabled={refreshing}
-              className="px-5 py-2.5 bg-[#8b4513] text-white rounded-lg text-sm font-semibold hover:bg-[#6d3410] transition-colors disabled:opacity-60"
-            >
-              {refreshing ? "Loading…" : "Load Audience History from Klaviyo"}
-            </button>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm border-collapse">
-              <thead>
-                <tr className="border-b-2 border-[#e8dcc8]">
-                  <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-4 py-3">
-                    Audience
-                  </th>
-                  <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3 whitespace-nowrap">
-                    Last Send
-                  </th>
-                  <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                    Since
-                  </th>
-                  <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3 whitespace-nowrap">
-                    90d RPR
-                  </th>
-                  <th className="text-center text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3 whitespace-nowrap">
-                    Sends (90d)
-                  </th>
-                  <th className="text-left text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] px-3 py-3">
-                    Status
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {health.map((row, i) => (
-                  <HealthRow key={i} row={row} onRefresh={() => mutate()} />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Burn list */}
-      <div className="bg-white rounded-xl border border-[#e8dcc8] shadow-sm p-5">
-        <div className="text-[11px] font-semibold uppercase tracking-widest text-[#8b7355] mb-4">
-          Burn List
-        </div>
-
-        {burn_list.length === 0 ? (
-          <p className="text-sm text-gray-400 italic mb-4">No burned audiences.</p>
-        ) : (
-          <div className="flex flex-wrap gap-2 mb-4">
-            {burn_list.map((aud) => (
-              <div
-                key={aud}
-                className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-1.5"
-              >
-                <span className="text-sm font-medium text-[#c0392b]">{aud}</span>
-                <button
-                  onClick={() => handleUnburn(aud)}
-                  className="text-xs text-gray-400 hover:text-[#c0392b] font-semibold transition-colors"
-                  title="Unburn"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Add to burn list */}
-        <div className="flex gap-2 items-center">
-          <input
-            type="text"
-            value={burnInput}
-            onChange={(e) => setBurnInput(e.target.value)}
-            placeholder="audience_name (e.g. lapsed_30d)"
-            onKeyDown={(e) => e.key === "Enter" && handleBurn()}
-            className="flex-1 border border-[#e8dcc8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#8b4513] bg-white"
+    <>
+      <PageHeader
+        title="Audiences"
+        sub="RPR & freshness per segment — live Klaviyo 90-day"
+        actions={
+          <ActionButton
+            label="Refresh from Klaviyo"
+            icon={<RefreshCw size={14} />}
+            run={() => apiPost("/api/refresh-audience-health")}
+            okMsg="Pulled fresh campaign history from Klaviyo"
+            onDone={() => aud.mutate()}
           />
-          <button
-            onClick={handleBurn}
-            disabled={!burnInput.trim()}
-            className="px-4 py-2 bg-[#c0392b] text-white rounded-lg text-sm font-semibold hover:bg-[#a93226] transition-colors disabled:opacity-40"
-          >
-            Burn
-          </button>
-        </div>
-        {burnMsg && (
-          <p className="text-xs text-[#8b7355] mt-2">{burnMsg}</p>
-        )}
+        }
+      />
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+        <StatCard
+          label="Tracked"
+          value={num(health.length)}
+          icon={<Users size={15} />}
+          sub="segments monitored"
+        />
+        <StatCard
+          label="Avg 90d RPR"
+          value={rpr(avgRpr)}
+          icon={<DollarSign size={15} />}
+          sub={`${withRpr.length} with revenue`}
+        />
+        <StatCard
+          label="Freshest"
+          value={freshest == null ? "—" : `${freshest}d ago`}
+          icon={<Sparkles size={15} />}
+          sub="most recent contact"
+        />
+        <StatCard
+          label="Burned"
+          value={num(burn_list.length)}
+          icon={<Flame size={15} />}
+          delta={burn_list.length > 0 ? "blocked by R5" : "none blocked"}
+          deltaTone={burn_list.length > 0 ? "bad" : "good"}
+        />
       </div>
-    </div>
+
+      <Card className="mb-5">
+        <CardHeader
+          title="RPR by audience (90d)"
+          sub="Top segments by revenue per recipient — live Klaviyo"
+        />
+        {barData.length ? (
+          <HBars data={barData} fmt={(n) => `$${n.toFixed(3)}`} />
+        ) : (
+          <EmptyState
+            title="No RPR data yet"
+            hint="Click Refresh from Klaviyo to pull 90-day campaign history."
+          />
+        )}
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Segment health"
+          sub="Sorted by 90-day RPR · RECENT < 7d · WARM 7–14d · stale otherwise"
+        />
+        {health.length === 0 ? (
+          <EmptyState
+            title="No audience health data"
+            hint="Click Refresh from Klaviyo to pull fresh campaign history."
+          />
+        ) : (
+          <DataTable<AudienceHealth> columns={columns} rows={sorted} />
+        )}
+      </Card>
+    </>
   );
 }
