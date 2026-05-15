@@ -160,7 +160,7 @@ All tables live in Neon Postgres. `schema.sql` is the base; `db/migrations/` hol
 - `id uuid pk`, `goal_id uuid → goals`, `measured_at timestamptz`, `period_to_date_value numeric`, `target_to_date_value numeric`, `gap_pct numeric`, `days_remaining int`, `required_daily_rate numeric`
 - Index: `(goal_id, measured_at)`
 
-**`priorities`** — daily priority decisions (Phase 2B, not yet written to)
+**`priorities`** — daily priority decisions (Phase 2B, written by `pacing.brain.compute_daily_priorities`, read by `pacing.orchestrator._today_priority_mode`)
 - `id uuid pk`, `decided_at`, `effective_for date`, `prioritized_workers jsonb`, `reasoning text`, `pacing_snapshot jsonb`
 - Index: `effective_for`
 
@@ -786,7 +786,7 @@ See Higgsfield REST section above. Default model: `higgsfield-ai/soul/standard`.
 
 **Phase 2A (built):** Pure math. `brain.py` computes `gap_pct`, `required_daily_rate`, `status` (ahead/on-track/behind), top-5 campaigns, top-5 flows. `cron.py` persists to `pacing_state` and posts Block Kit digest to Slack.
 
-**Phase 2B (not built):** LLM-driven priority decisions. `brain.py` should write a structured `priorities` table row saying "focus on campaigns over SEO today" based on pacing state. The `orchestrator.py` should read from `priorities`. The `decisions` table is designed for this but nothing writes to it yet except `pacing/calendar.py` (calendar plans).
+**Phase 2B (built):** `compute_daily_priorities()` in `brain.py` determines today's mode (boost/push/maintain/ease) from pacing gap, writes to both `decisions` (decision_type='daily_priority') and `priorities` tables. `pacing/cron.py` calls it at 7:30am. `orchestrator.py` reads the mode and acts: boost sorts by RPR then injects an emergency extra slot for the first cooldown-free HIGH_FREQ audience; push sorts by RPR only; ease drops the lowest-revenue campaign slot when at cadence limit (≥3 campaign sends).
 
 ---
 
@@ -976,10 +976,8 @@ Pricing reference: Sonnet $3/$15 per 1M, Opus 4.7 $15/$75, Haiku $1/$5 (input/ou
 - `app/dashboard.py` — live HTML dashboard
 
 ### Not built / known gaps
-- **Phase 2B priority decisions:** `priorities` table empty; `brain.py` never writes it; orchestrator ignores it. Next major architectural gap.
-- **Auto-scheduling:** campaigns deploy to Klaviyo DRAFT only. Boris must manually schedule send time.
-- **`app/slack.py`:** both endpoints raise `NotImplementedError` — do not use. Real interactive handler is in `app/main.py`.
 - **Next.js dashboard:** deferred; `app/dashboard.py` is the FastAPI HTML dashboard (fully functional).
+- **Integration tests:** unit tests exist (validator, pacing, ingestion). No end-to-end tests for the full campaign dispatch chain.
 
 ### Recently completed (session May 2026)
 - **Tests:** 42 tests across `tests/test_pacing.py` and `tests/test_validator.py` — all 17 validator rules + pacing math covered.
@@ -998,14 +996,14 @@ Pricing reference: Sonnet $3/$15 per 1M, Opus 4.7 $15/$75, Haiku $1/$5 (input/ou
 ## Build phases (status)
 
 1. ~~Performance ingestion (Layer 6)~~ **DONE**
-2. ~~Pacing brain v0 (Layer 1)~~ **DONE** (Phase 2A math; Phase 2B priority decisions pending)
+2. ~~Pacing brain (Layer 1)~~ **DONE** — Phase 2A math + Phase 2B priority decisions: `compute_daily_priorities()` writes to `decisions`+`priorities` tables; orchestrator reads mode and acts on it (sort by RPR in push/boost, inject emergency slot in boost, drop weakest in ease)
 3. ~~Skill runner + first orchestrated worker~~ **DONE**
 4. ~~Calendar generator~~ **DONE**
 5. ~~Other workers~~ **DONE** (email, SMS, SEO blog, flow monitor, learning loop)
 6. ~~Dashboard~~ **DONE** — FastAPI HTML, live data from Klaviyo/performance table, approve buttons, top performers, audience health with RPR
 7. ~~Learning loop~~ **DONE** (all 3 cadences)
-8. **Phase 2B priority brain** — `priorities` table write + orchestrator reads it
-9. **Auto-scheduling** — wire send time into Klaviyo instead of leaving at DRAFT
+8. ~~Skill prompt files~~ **DONE** — all 6 workers/prompts/*.md populated (campaign_email, flow_tuning, seo_blog, sleep_audio, sms, hive_mind)
+9. ~~Auto-scheduling~~ **DONE** — `workers/auto_schedule.py` sets `send_strategy` + triggers `campaign-send-jobs`; called from `beezy_campaign.py` line 777
 10. ~~Tests~~ **DONE** — 42 tests covering validator (17 rules) and pacing math; production-DB-safe
 
 ---
