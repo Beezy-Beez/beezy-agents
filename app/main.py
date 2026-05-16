@@ -274,6 +274,22 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 
+@app.post("/api/deploy")
+async def api_deploy(request: Request):
+    import os
+    data = await request.json()
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {os.environ.get('DEPLOY_API_KEY', '')}":
+        return {"error": "Unauthorized"}, 401
+    from workers.beezy_campaign import create_campaign
+    result = create_campaign(**data)
+    return {"status": "ok", "result": result}
+
+@app.get("/api/deploy/health")
+async def deploy_health():
+    return {"status": "ok"}
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -1207,3 +1223,7 @@ async def api_seo_topic_delete(request: Request):
         return JSONResponse({"status": "deleted", "keyword": keyword})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/api/deploy/health")
+async def deploy_health():
+    return {"status": "ok"}
