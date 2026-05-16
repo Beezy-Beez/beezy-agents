@@ -139,12 +139,19 @@ def _insert_draft_issue(
     long_form_wc = len(long_form.split())
     teaser_wc = len(email_teaser.split())
 
+    # page_seo_title → page_title (H1 + SEO title); page_meta_description → page_dek
+    # page_breadcrumb_label derived from topic_summary (6-10 word mechanism descriptor)
+    page_title = issue_data.get("page_seo_title") or ""
+    page_dek = issue_data.get("page_meta_description") or ""
+    page_breadcrumb_label = issue_data.get("topic_summary") or ""
+
     conn.execute(
         """
         insert into issues (
             number, subject_line, subject_line_48h, preview_text,
             character_name, character_year, character_location, pillar,
             topic_summary, page_slug,
+            page_title, page_dek, page_breadcrumb_label,
             cover_image_prompt, cover_image_url,
             long_form_body, email_teaser_body,
             until_next_teaser, previous_issues_referenced,
@@ -154,6 +161,7 @@ def _insert_draft_issue(
             %s, %s, %s, %s,
             %s, %s, %s, %s,
             %s, %s,
+            %s, %s, %s,
             %s, %s,
             %s, %s,
             %s, %s,
@@ -170,6 +178,9 @@ def _insert_draft_issue(
             pillar = excluded.pillar,
             topic_summary = excluded.topic_summary,
             page_slug = excluded.page_slug,
+            page_title = excluded.page_title,
+            page_dek = excluded.page_dek,
+            page_breadcrumb_label = excluded.page_breadcrumb_label,
             cover_image_prompt = excluded.cover_image_prompt,
             cover_image_url = coalesce(excluded.cover_image_url, issues.cover_image_url),
             long_form_body = excluded.long_form_body,
@@ -195,6 +206,9 @@ def _insert_draft_issue(
             issue_data.get("pillar"),
             issue_data.get("topic_summary"),
             issue_data.get("page_slug"),
+            page_title,
+            page_dek,
+            page_breadcrumb_label,
             issue_data.get("cover_image_prompt"),
             cover_image_url,
             long_form,

@@ -247,8 +247,8 @@ def _handle_flow_experiment(slot):
 
 
 def _handle_sleep_audio(slot):
-    from workers.sleep_audio_producer import run_sleep_audio_slot
-    return run_sleep_audio_slot(slot)
+    from workers.episode_deployer import run as episode_deploy
+    return episode_deploy(slot)
 
 
 def _handle_sms(slot):

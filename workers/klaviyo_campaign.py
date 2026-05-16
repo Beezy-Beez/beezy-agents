@@ -176,33 +176,173 @@ def _assign_template(message_id: str, template_id: str) -> None:
     })
 
 
+def _create_page_for_issue(issue_number: int) -> dict:
+    """
+    Create a Shopify page (isPublished=False) for a Hive Mind issue that has all
+    content but no Shopify page yet.  Mirrors scripts/publish_page.py main() but
+    callable programmatically.
+
+    Returns {page_id, page_handle, page_url, image_url}.
+    Raises on any failure — caller logs and continues.
+    """
+    from workers.shopify_page_builder import build_page_html
+    from workers.shopify_publisher import create_page, upload_image_to_shopify
+    from datetime import datetime, timezone
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        row = conn.execute(
+            """
+            SELECT number, page_title, page_dek, page_breadcrumb_label,
+                   page_slug, long_form_body, until_next_teaser, read_time_min,
+                   cover_image_url, shopify_image_id, shopify_image_url,
+                   preview_text
+            FROM issues WHERE number = %s
+            """,
+            (issue_number,),
+        ).fetchone()
+
+    if not row:
+        raise ValueError(f"Issue {issue_number} not found in DB.")
+
+    (
+        number, page_title, page_dek, page_breadcrumb_label,
+        page_slug, long_form_body, until_next_teaser, read_time_min,
+        cover_image_url, shopify_image_id, shopify_image_url,
+        preview_text,
+    ) = row
+
+    missing = [f for f in ("page_title", "page_dek", "page_slug", "long_form_body", "cover_image_url")
+               if not locals().get(f)]
+    if missing:
+        raise ValueError(f"Issue {issue_number} missing required fields for page: {missing}")
+
+    issue_dict = {
+        "number":               number,
+        "page_title":           page_title,
+        "page_dek":             page_dek,
+        "page_breadcrumb_label": page_breadcrumb_label or "",
+        "page_slug":            page_slug,
+        "long_form_body":       long_form_body,
+        "until_next_teaser":    until_next_teaser or "",
+        "read_time_min":        read_time_min,
+        "cover_image_url":      cover_image_url,
+        "shopify_image_url":    shopify_image_url,
+    }
+
+    if shopify_image_id and shopify_image_url:
+        print(f"[page_create] Issue {number}: reusing existing Shopify image {shopify_image_id}")
+        image_info = {"id": shopify_image_id, "url": shopify_image_url}
+    else:
+        alt = f"The Hive Mind Issue {number:03d} — {page_breadcrumb_label or page_title}"
+        print(f"[page_create] Issue {number}: uploading cover image to Shopify CDN...")
+        image_info = upload_image_to_shopify(cover_image_url, alt=alt)
+        print(f"[page_create] Issue {number}: image_id={image_info['id']}")
+        with psycopg.connect(DATABASE_URL) as conn:
+            conn.execute(
+                "UPDATE issues SET shopify_image_id = %s, shopify_image_url = %s WHERE number = %s",
+                (image_info["id"], image_info["url"], number),
+            )
+
+    issue_dict["shopify_image_url"] = image_info["url"]
+
+    print(f"[page_create] Issue {number}: building page HTML...")
+    body_html = build_page_html(issue_dict)
+
+    print(f"[page_create] Issue {number}: creating Shopify page (isPublished=False)...")
+    page_info = create_page(
+        title=page_title,
+        body_html=body_html,
+        handle=page_slug,
+        seo_title=page_title,
+        seo_description=preview_text,
+        is_published=False,
+        image_file_id=image_info["id"],
+    )
+    print(f"[page_create] Issue {number}: page_id={page_info['id']}  url={page_info['url']}")
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        conn.execute(
+            """
+            UPDATE issues SET
+                shopify_page_id     = %s,
+                shopify_page_handle = %s,
+                shopify_page_url    = %s
+            WHERE number = %s
+            """,
+            (page_info["id"], page_info["handle"], page_info["url"], number),
+        )
+
+    return {
+        "page_id":   page_info["id"],
+        "page_url":  page_info["url"],
+        "image_url": image_info["url"],
+    }
+
+
 def auto_create_pending() -> str:
     """
-    Called at 10am cron. Finds all issues with status='draft', creates a Klaviyo
-    campaign for each, and posts a single Slack summary.
+    Called at 10am cron.
+
+    Phase 1 — create Shopify pages (isPublished=False) for draft issues that have
+    all required content but no shopify_page_id yet.
+
+    Phase 2 — create Klaviyo DRAFT campaigns for draft issues that now have a
+    shopify_page_id but no klaviyo_campaign_id.
 
     Returns a short summary string for logging.
     """
+    # ── Phase 1: create missing Shopify pages ──────────────────────────────
     with psycopg.connect(DATABASE_URL) as conn:
-        rows = conn.execute(
-            "SELECT number FROM issues WHERE status = 'draft' AND shopify_page_id IS NOT NULL ORDER BY number ASC LIMIT 5"
+        page_rows = conn.execute(
+            """
+            SELECT number FROM issues
+            WHERE status = 'draft'
+              AND shopify_page_id IS NULL
+              AND page_title IS NOT NULL
+              AND long_form_body IS NOT NULL
+              AND cover_image_url IS NOT NULL
+            ORDER BY number ASC LIMIT 5
+            """
         ).fetchall()
 
-    if not rows:
-        print("[auto_create] No draft issues — nothing to do.")
-        return "no_pending"
+    page_results: list[str] = []
+    for (number,) in page_rows:
+        try:
+            out = _create_page_for_issue(number)
+            page_results.append(f"Issue {number:03d} page ✅ — {out['page_url']}")
+        except Exception as exc:
+            msg = str(exc)[:120]
+            page_results.append(f"Issue {number:03d} page ❌ — {msg}")
+            print(f"[auto_create] Issue {number} page creation failed: {exc}")
+            notify_failure(source=f"auto_create/page/{number}", error=str(exc))
 
-    results: list[str] = []
-    for (number,) in rows:
+    if page_results:
+        print("[auto_create] Page creation:\n" + "\n".join(page_results))
+
+    # ── Phase 2: create Klaviyo campaigns for issues with pages ────────────
+    with psycopg.connect(DATABASE_URL) as conn:
+        campaign_rows = conn.execute(
+            "SELECT number FROM issues WHERE status = 'draft' AND shopify_page_id IS NOT NULL AND klaviyo_campaign_id IS NULL ORDER BY number ASC LIMIT 5"
+        ).fetchall()
+
+    if not campaign_rows:
+        if not page_results:
+            print("[auto_create] No pending issues — nothing to do.")
+            return "no_pending"
+        return "\n".join(page_results)
+
+    campaign_results: list[str] = []
+    for (number,) in campaign_rows:
         try:
             out = create_campaign_for_issue(number)
-            results.append(f"Issue {number:03d} ✅ — campaign {out['campaign_id'][:12]}…")
+            campaign_results.append(f"Issue {number:03d} campaign ✅ — {out['campaign_id'][:12]}…")
         except Exception as exc:
             msg = str(exc)[:100]
-            results.append(f"Issue {number:03d} ❌ — {msg}")
-            print(f"[auto_create] Issue {number} failed: {exc}")
+            campaign_results.append(f"Issue {number:03d} campaign ❌ — {msg}")
+            print(f"[auto_create] Issue {number} campaign failed: {exc}")
 
-    summary = "\n".join(results)
+    all_results = page_results + campaign_results
+    summary = "\n".join(all_results)
     print(f"[auto_create] Done:\n{summary}")
     return summary
 
@@ -210,6 +350,10 @@ def auto_create_pending() -> str:
 def create_campaign_for_issue(issue_number: int) -> dict:
     """
     Full campaign creation flow for one Hive Mind issue.
+
+    Ensures a Shopify page exists first (creates isPublished=False if missing),
+    creates the Klaviyo DRAFT campaign, then updates both hub index pages.
+
     Returns {campaign_id, template_id, message_id, admin_url}.
     """
     from_email = os.environ.get("KLAVIYO_FROM_EMAIL")
@@ -223,8 +367,10 @@ def create_campaign_for_issue(issue_number: int) -> dict:
             SELECT number, status,
                    subject_line, preview_text, page_slug, page_dek,
                    email_teaser_body, long_form_body,
-                   cover_image_url, shopify_page_url,
-                   klaviyo_campaign_id
+                   cover_image_url, shopify_image_url,
+                   shopify_page_id, shopify_page_url,
+                   klaviyo_campaign_id,
+                   pillar, read_time_min
             FROM issues WHERE number = %s
             """,
             (issue_number,),
@@ -237,8 +383,10 @@ def create_campaign_for_issue(issue_number: int) -> dict:
         number, status,
         subject_line, preview_text, page_slug, page_dek,
         email_teaser_body, long_form_body,
-        cover_image_url, shopify_page_url,
+        cover_image_url, shopify_image_url,
+        shopify_page_id, shopify_page_url,
         existing_campaign_id,
+        pillar, read_time_min,
     ) = row
 
     if status == "published":
@@ -250,6 +398,19 @@ def create_campaign_for_issue(issue_number: int) -> dict:
         )
     if not email_teaser_body:
         raise ValueError(f"Issue {issue_number} has no email_teaser_body.")
+
+    # ── Ensure Shopify page exists (create as Hidden if missing) ──────────────
+    if not shopify_page_id:
+        print(f"[campaign] Issue {number}: no page yet — creating now (isPublished=False)...")
+        try:
+            page_result   = _create_page_for_issue(issue_number)
+            shopify_page_url  = page_result["page_url"]
+            shopify_image_url = page_result.get("image_url") or shopify_image_url
+            print(f"[campaign] Issue {number}: page created — {shopify_page_url}")
+        except Exception as exc:
+            print(f"[campaign] Issue {number}: page creation failed (continuing): {exc}")
+
+    page_url = shopify_page_url or f"{SHOPIFY_DOMAIN}/pages/{page_slug}"
 
     issue = {
         "number":            number,
@@ -302,7 +463,6 @@ def create_campaign_for_issue(issue_number: int) -> dict:
         conn.commit()
     print(f"[campaign] DB updated: status=scheduled")
 
-    page_url  = shopify_page_url or f"{SHOPIFY_DOMAIN}/pages/{page_slug}"
     admin_url = f"https://www.klaviyo.com/campaign/{campaign_id}/wizard"
 
     post_draft(
@@ -320,17 +480,23 @@ def create_campaign_for_issue(issue_number: int) -> dict:
         body=f"Klaviyo: {admin_url}\n\nPage: {page_url}",
     )
 
-    # Update hub/archive pages now that the issue page is confirmed live
+    # ── Update hub index pages via lib.index_updater ──────────────────────────
     try:
-        from workers.hub_updater import add_issue_to_hubs
-        hub_results = add_issue_to_hubs({
+        from workers.hub_updater import _issue_card
+        from lib.index_updater import update_index_page
+        card_html = _issue_card({
             "number":           number,
             "subject_line":     subject_line,
             "page_dek":         page_dek,
             "cover_image_url":  cover_image_url,
+            "shopify_image_url": shopify_image_url or "",
             "shopify_page_url": page_url,
+            "pillar":           pillar or "",
+            "read_time_min":    read_time_min,
         })
-        print(f"[campaign] Hub updates: {hub_results}")
+        r1 = update_index_page("sleep-science-hub", card_html, "hive_mind")
+        r2 = update_index_page("the-hive-mind",     card_html, "hive_mind")
+        print(f"[campaign] Hub updates: sleep-science-hub={r1}  the-hive-mind={r2}")
     except Exception as exc:
         print(f"[campaign] Hub update failed (non-fatal): {exc}")
 
