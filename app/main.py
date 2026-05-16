@@ -274,17 +274,6 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 
-@app.post("/api/deploy")
-async def api_deploy(request: Request):
-    import os
-    data = await request.json()
-    auth = request.headers.get("Authorization", "")
-    if auth != f"Bearer {os.environ.get('DEPLOY_API_KEY', '')}":
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    from workers.beezy_campaign import create_campaign
-    result = create_campaign(**data)
-    return {"status": "ok", "result": result}
-
 @app.get("/api/deploy/health")
 async def deploy_health():
     return {"status": "ok"}

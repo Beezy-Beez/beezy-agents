@@ -7,6 +7,7 @@ through Claude Sonnet. Routes to action handlers. No human needed.
 Commands Boris can type in #beezy-agents:
   "approved"           → approve current month's calendar
   "approved week"      → approve the current 7-day plan
+  "approved issue N"   → approve Hive Mind issue N and write slot to calendar
   "deploy campaigns"   → trigger today's orchestrator
   "what's revenue"     → pull today's pacing from Neon
   "generate calendar"  → regenerate this month's calendar
@@ -229,7 +230,7 @@ HELP_TEXT = """*Beezy Agent Commands* — type any of these in #beezy-agents:
 
 *Calendar:*
 `approved` — approve the monthly calendar
-`approved week` — approve the next 7 days\n`approved today` — approve just today\n`approved may 20` — approve a specific date
+`approved week` — approve the next 7 days\n`approved today` — approve just today\n`approved may 20` — approve a specific date\n`approved issue N` — approve Hive Mind issue N and write slot to calendar
 `generate calendar` — regenerate this month's calendar
 `run weekly brief` — post next 7 days to Slack now
 `calendar` — view this month's calendar
@@ -556,10 +557,73 @@ def _handle_cancel_campaign(conn, params: dict) -> str:
     return f"⚠️ Campaign `{campaign_id}` not found in pending queue. May already be scheduled or sent."
 
 
+def _handle_approve_issue(conn, params: dict) -> str:
+    """Approve a specific Hive Mind issue and write a calendar_executions slot.
+
+    Computes the send date from Issue 014 baseline (May 15) + 3 days per issue.
+    """
+    import uuid
+    from datetime import date as _date, timedelta
+
+    issue_num = int(params.get("issue", 0))
+    if not issue_num:
+        return "❌ No issue number provided."
+
+    # Look up issue in DB
+    row = conn.execute(
+        "SELECT subject_line, topic_summary, status FROM issues WHERE number = %s",
+        (issue_num,),
+    ).fetchone()
+    if not row:
+        return f"❌ Issue {issue_num} not found in DB. Run the copywriter first."
+
+    subject, topic, status = row
+    if status == "published":
+        return f"⚠️ Issue {issue_num} is already published — nothing to approve."
+
+    # Compute send date: Issue 014 = 2026-05-15, every 3 days
+    BASE_ISSUE = 14
+    BASE_DATE  = _date(2026, 5, 15)
+    delta      = (issue_num - BASE_ISSUE) * 3
+    send_date  = BASE_DATE + timedelta(days=delta)
+
+    # Check if a slot already exists for this issue
+    existing = conn.execute(
+        "SELECT id FROM calendar_executions WHERE slot_date = %s AND content_type = 'hive_mind'",
+        (send_date,),
+    ).fetchone()
+    if existing:
+        return (
+            f"⚠️ A hive_mind slot already exists for {send_date}. "
+            "Nothing written."
+        )
+
+    conn.execute(
+        """INSERT INTO calendar_executions
+               (id, slot_date, content_type, audience, topic_angle, status, notes, executed_at)
+           VALUES (%s, %s, 'hive_mind', 'hive_mind_prospects', %s, 'pending', %s, NOW())""",
+        (
+            uuid.uuid4(),
+            send_date,
+            topic or subject,
+            f"Issue {issue_num} — approved via Slack",
+        ),
+    )
+    conn.commit()
+
+    return (
+        f"✅ *Issue {issue_num} approved.*\n"
+        f"Slot written to calendar: *{send_date}* ({send_date.strftime('%A')})\n"
+        f"Subject: _{subject}_\n"
+        f"The 10am auto-create cron will build the Klaviyo campaign once the Shopify page is published."
+    )
+
+
 HANDLERS = {
     "approve_calendar":  lambda conn, _: _handle_approve_calendar(conn),
     "approve_week":      lambda conn, _: _handle_approve_week(conn),
     "approve_day":       _handle_approve_day,
+    "approve_issue":     _handle_approve_issue,
     "deploy_today":      lambda conn, _: (_handle_deploy_today(), None)[0],
     "revenue_query":     lambda conn, _: _handle_revenue_query(conn),
     "generate_calendar": lambda conn, _: _handle_generate_calendar(),
@@ -631,10 +695,13 @@ def _process_beezy_agents(conn) -> None:
             }
             # Cancel campaign — "cancel ABC123"
             import re as _re
-            cancel_match = _re.match(r'^cancel\s+([A-Za-z0-9]+)$', text_lower)
-            burn_match   = _re.match(r'^burn\s+([a-z0-9_\- ]+)$', text_lower)
-            unburn_match = _re.match(r'^unburn\s+([a-z0-9_\- ]+)$', text_lower)
-            if cancel_match:
+            cancel_match       = _re.match(r'^cancel\s+([A-Za-z0-9]+)$', text_lower)
+            burn_match         = _re.match(r'^burn\s+([a-z0-9_\- ]+)$', text_lower)
+            unburn_match       = _re.match(r'^unburn\s+([a-z0-9_\- ]+)$', text_lower)
+            approve_issue_match = _re.match(r'^approved?\s+(?:hive[\s_]?mind\s+)?issue\s+(\d+)$', text_lower)
+            if approve_issue_match:
+                result = {"action": "approve_issue", "params": {"issue": int(approve_issue_match.group(1))}}
+            elif cancel_match:
                 result = {"action": "cancel_campaign", "params": {"campaign_id": cancel_match.group(1)}}
             elif burn_match:
                 result = {"action": "burn_audience", "params": {"audience": burn_match.group(1).strip()}}
