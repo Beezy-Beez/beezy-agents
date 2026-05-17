@@ -34,6 +34,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from sqlalchemy import text
+
 import httpx
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
@@ -139,6 +141,19 @@ async def _run_pipeline(request: GenerateRequest, run_id: str) -> None:
 
     log.info("pipeline_start", episode_id=request.episode_id, run_id=run_id)
     try:
+        # Pre-insert the runs row so cost_records (and any other table with
+        # cost_records_run_id_fkey) can reference it without FK violations.
+        async with get_session() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO runs (id, episode_id, started_at) "
+                    "VALUES (:id, :episode_id, NOW()) "
+                    "ON CONFLICT (id) DO NOTHING"
+                ),
+                {"id": run_id, "episode_id": request.episode_id},
+            )
+            await session.commit()
+
         _set_status("tts_running")
         profile = load_profile(request.profile)
 
