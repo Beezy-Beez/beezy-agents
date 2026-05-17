@@ -216,6 +216,15 @@ def _run_cron_jobs(now: datetime) -> None:
         except Exception as e:
             print(f"[cron] deliverability error: {e}")
 
+    # Hive Mind status sync — 9:10pm daily (check Klaviyo for Sent campaigns → mark published → refresh SSH)
+    if h == 21 and m == 10:
+        try:
+            from workers.hive_mind_status_sync import sync_sent_campaigns
+            print("[cron] hive_mind_status_sync")
+            sync_sent_campaigns()
+        except Exception as e:
+            print(f"[cron] hive_mind_status_sync error: {e}")
+
     # Weekly approval brief — Sunday 9:05pm ET (after learning_loop at 9pm finishes)
     if now.weekday() == 6 and h == 21 and m == 5:
         try:

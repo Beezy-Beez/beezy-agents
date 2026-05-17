@@ -323,4 +323,9 @@ def run_morning_brief() -> None:
     slack_post({"blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]})
     print(f"[morning_brief] Posted daily briefing — {today.isoformat()}")
 
-    # sleep-science-hub is audio-only; no Hive Mind featured box
+    # Refresh SSH featured box — catches any issue that was sent overnight at 8pm
+    try:
+        from workers.hub_updater import refresh_ssh_featured_issue
+        refresh_ssh_featured_issue()
+    except Exception as _e:
+        print(f"[morning_brief] SSH featured refresh failed: {_e}")

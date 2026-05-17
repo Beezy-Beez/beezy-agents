@@ -305,9 +305,14 @@ def _all_published_issues() -> list[dict]:
 def _latest_sent_issue() -> dict | None:
     """Return the most recently *sent* Hive Mind issue.
 
-    'Sent' = scheduled_send_at <= NOW() OR published_at IS NOT NULL,
-    whichever is earlier.  Issues prepared ahead of time (scheduled_send_at
-    in the future) are excluded — they haven't gone out yet.
+    'Sent' = status='published' (authoritative — set when Klaviyo campaign
+    status transitions to Sent) OR scheduled_send_at <= NOW() (for issues
+    whose send time has passed but published_at hasn't been written yet).
+
+    Issues with klaviyo_campaign_id but still status='scheduled' are excluded
+    — those are drafts awaiting send, not yet in subscribers' inboxes.
+    Issues sent before this campaign system existed (no klaviyo_campaign_id)
+    are included if status='published'.
     """
     try:
         from db.connection import get_conn
@@ -317,13 +322,9 @@ def _latest_sent_issue() -> dict | None:
                           cover_image_url, shopify_image_url, shopify_page_url,
                           pillar, read_time_min
                    FROM issues
-                   WHERE klaviyo_campaign_id IS NOT NULL
-                     AND (
-                       (scheduled_send_at IS NOT NULL AND scheduled_send_at <= NOW())
-                       OR published_at IS NOT NULL
-                       OR (campaign_drafted_at IS NOT NULL AND campaign_drafted_at < CURRENT_DATE)
-                     )
-                   ORDER BY COALESCE(scheduled_send_at, published_at, campaign_drafted_at) DESC
+                   WHERE status = 'published'
+                      OR (scheduled_send_at IS NOT NULL AND scheduled_send_at <= NOW())
+                   ORDER BY number DESC
                    LIMIT 1"""
             ).fetchone()
         if not row:
