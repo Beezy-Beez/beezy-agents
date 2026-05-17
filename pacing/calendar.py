@@ -272,6 +272,31 @@ def _build_context(month_start: date) -> str:
     )
     ctx["segment_rpr_data"] = seg_data.get("context_text", "")
 
+    # Already-dispatched slots — Opus must not re-schedule these audiences within 7 days
+    try:
+        from db.connection import get_conn as _gc
+        with _gc() as _c:
+            _dispatched = _c.execute(
+                """SELECT slot_date::text, content_type, audience
+                   FROM calendar_executions
+                   WHERE slot_date >= %s AND slot_date < %s
+                     AND status NOT IN ('failed', 'skipped')
+                   ORDER BY slot_date""",
+                (str(max(month_start, date.today() - timedelta(days=7))),
+                 str(max(month_start, date.today())))
+            ).fetchall()
+        if _dispatched:
+            ctx["already_dispatched_slots"] = [
+                {"date": r[0], "content_type": r[1], "audience": r[2]}
+                for r in _dispatched
+            ]
+            ctx["R2_NOTE"] = (
+                "Respect the 7-day cooldown (R2): do NOT schedule any audience "
+                "within 7 days of its last dispatched slot above."
+            )
+    except Exception:
+        pass
+
     # Subject pattern learning — bias Opus toward winning subject type per audience
     try:
         from db.connection import get_conn as _gc
@@ -338,6 +363,22 @@ SMS: 2-3x per WEEK. active_seal (product drops), vip (flash sales), lapsed_30d (
 FLOW EXPERIMENTS: 1–2 per week. No revenue. Critical to growing flow contribution %.
 
 SEO BLOG: 4–6/month, spread evenly. revenue_estimate = 0. No email send involved.
+
+SLEEP AUDIO — PRODUCTION REQUIREMENTS (mandatory):
+Every sleep_audio slot topic_angle MUST be a specific, producible episode concept.
+NEVER write "Sleep Better Podcast episode" or any generic placeholder.
+Format: "[Episode type]: [Working title / creative direction]"
+Valid episode types with example concepts:
+  - Sleep story: A slow train crossing the Scottish Highlands at midnight
+  - Sleep story: Drifting down the Amazon on a wooden boat after dark
+  - Sleep story: An autumn evening alone in a French farmhouse kitchen
+  - Sleep story: A lighthouse keeper's last watch of the season
+  - Guided meditation: 20-min body scan for women who can't turn off their minds
+  - Guided meditation: Releasing the day — shoulder-to-hip tension release for 50+
+  - Soundscape: Pacific rainforest at 3am — rain, frogs, distant water
+  - Soundscape: Summer thunderstorm rolling across a wheat field at dusk
+  - Affirmation: You've done enough today — 12-min evening surrender
+Plan 5–6 distinct concepts per month. No repeating episode type on consecutive sleep_audio slots.
 
 WEEKEND RULE: ALL 7 DAYS ARE VALID SEND DAYS. Do NOT skip Saturdays or Sundays.
   Women 50+ check email on weekends. Distribute sends evenly across all 7 days of the week.
