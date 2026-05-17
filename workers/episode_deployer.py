@@ -786,8 +786,13 @@ def _deploy_pre_produced(slot: dict[str, Any], meta: dict[str, Any]) -> dict[str
         page_url = page_result["url"]
         print(f"[episode_deployer] Page created: {page_url}")
     except Exception as exc:
-        print(f"[episode_deployer] Page creation failed (continuing with predicted URL): {exc}")
-        notify_failure("episode_deployer/page", str(exc))
+        exc_str = str(exc)
+        if "TAKEN" in exc_str or "already been taken" in exc_str.lower():
+            # Page exists from a prior run — predicted URL is correct, reuse silently
+            print(f"[episode_deployer] Page already exists at {page_url} — reusing")
+        else:
+            print(f"[episode_deployer] Page creation failed (continuing with predicted URL): {exc}")
+            notify_failure("episode_deployer/page", str(exc))
 
     # ── 2. Update hub index pages ─────────────────────────────────────────
     try:
