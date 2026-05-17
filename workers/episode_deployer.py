@@ -117,12 +117,15 @@ _STORY_CSS = """<style>
 .sleep-story-page .more-content-card h3 { font-family: 'Cormorant Garamond', Georgia, serif; font-size: 28px; font-style: italic; color: #87401C; margin: 0 0 12px 0; }
 .sleep-story-page .more-content-card p { font-size: 16px; color: #2a1f15; margin: 0 0 22px 0; }
 .sleep-story-page .more-content-card .btn-large { display: inline-block; background: #87401C; color: #ffffff; padding: 14px 32px; font-size: 14px; font-weight: 600; letter-spacing: 0.8px; border-radius: 2px; text-decoration: none; text-transform: uppercase; }
+.sleep-story-page .script-block { background: #ffffff; border: 1px solid #e8dfd0; border-radius: 4px; padding: 32px 36px; }
+.sleep-story-page .script-block .prose p { font-size: 16px; line-height: 1.8; }
 @media screen and (max-width: 600px) {
   .sleep-story-page h1 { font-size: 36px !important; }
   .sleep-story-page .lead { font-size: 17px !important; }
   .sleep-story-page h2 { font-size: 26px !important; }
   .sleep-story-page .products-grid { flex-direction: column; }
   .sleep-story-page .product-card { min-width: 100%; }
+  .sleep-story-page .script-block { padding: 22px 20px; }
 }
 </style>"""
 
@@ -161,6 +164,7 @@ def _page_html_story(meta: dict[str, Any], page_url: str = "") -> str:
     duration    = meta.get("duration_minutes")
     desc_short  = (meta.get("description_short") or "").strip()
     desc_long   = (meta.get("description_long") or desc_short).strip()
+    script_text = (meta.get("script_text") or "").strip()
     embed_raw   = meta.get("buzzsprout_embed_url") or meta.get("buzzsprout_url") or ""
     cover_image = (meta.get("hero_image_url") or meta.get("cover_image_url") or "").strip()
 
@@ -196,6 +200,25 @@ def _page_html_story(meta: dict[str, Any], page_url: str = "") -> str:
         paras = [desc_short] if desc_short else [""]
     prose_html = "\n\n".join(f"      <p>{p}</p>" for p in paras)
 
+    # "Read the Full Story" section — between prose and product grid
+    if script_text:
+        s_paras = [p.strip() for p in script_text.split("\n\n") if p.strip()]
+        if not s_paras:
+            s_paras = [p.strip() for p in script_text.split("\n") if p.strip()]
+        s_body = "\n".join(f"        <p>{p}</p>" for p in s_paras)
+        script_section = (
+            '    <div class="divider"></div>\n\n'
+            '    <h2>Read the Full Story</h2>\n'
+            '    <p class="section-sub">The full narration — read along or return to the audio above.</p>\n\n'
+            '    <div class="script-block">\n'
+            '      <div class="prose">\n'
+            + s_body + "\n"
+            + '      </div>\n'
+            + '    </div>\n\n'
+        )
+    else:
+        script_section = ""
+
     return (
         _STORY_CSS + "\n\n"
         '<div class="sleep-story-page">\n'
@@ -210,6 +233,7 @@ def _page_html_story(meta: dict[str, Any], page_url: str = "") -> str:
         + '    <div class="prose">\n'
         + prose_html + "\n"
         + '    </div>\n\n'
+        + script_section
         + '    <div class="divider"></div>\n\n'
         + '    <h2>Pair this story with our sleep stack</h2>\n'
         + '    <p class="section-sub">The story takes you under. The stack keeps you there.</p>\n\n'
@@ -606,23 +630,28 @@ def _is_product_image(url: str) -> bool:
 
 
 def _episode_image_prompt(meta: dict[str, Any]) -> str:
-    """Build a ≤12-word Higgsfield image prompt tailored to the episode type."""
+    """Build a Higgsfield image prompt (≤12 words) from episode context.
+
+    Palette: muted creams, soft blues, silver moonlight. No warm/golden/candlelight.
+    Person (when included): Caucasian beautiful woman mid-60s.
+    Style: cinematic, painterly, dreamlike — not stock photography.
+    """
     episode_type = meta.get("episode_type", "sleep_story")
     title = meta.get("title", "")
 
     if episode_type == "morning_meditation":
-        return "white woman 60s morning sunlight window energized radiant joyful awakening"
+        return "Caucasian woman 60s dawn window calm soft blue cinematic dreamlike"
     if episode_type in ("guided_meditation", "affirmation_meditation"):
-        return "white woman 60s serene bedroom warm golden light sleeping peacefully smiling"
+        return "Caucasian woman 60s moonlight bedroom serene calm drifting soft blue cinematic"
     if episode_type == "soundscape":
-        return "white woman 50s bedroom night soft candlelight atmospheric warm sleep"
-    # sleep_story — derive 1-2 title keywords for contextual grounding
+        return "twilight landscape moonlight silver mist calm dreamlike cinematic painterly peaceful"
+    # sleep_story — derive scene from title keywords; person optional
     stops = {"the", "a", "an", "of", "in", "at", "to", "for", "with", "and", "or",
              "is", "it", "on", "by", "from", "her", "his", "my", "your", "this", "that"}
     words = re.sub(r"[^a-zA-Z\s]", "", title).lower().split()
     kws = [w for w in words if w not in stops][:2]
-    kw_str = " ".join(kws) if kws else "enchanted dream"
-    return f"white woman 50s dreaming {kw_str} warm bedroom moonlight soft golden"
+    kw_str = " ".join(kws) if kws else "twilight path"
+    return f"{kw_str} soft moonlight mist cinematic dreamlike peaceful calm silver blue"
 
 
 def _generate_episode_image(meta: dict[str, Any]) -> str:

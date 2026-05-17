@@ -53,4 +53,14 @@ You receive a JSON object with:
 
 Return ONLY valid JSON. No markdown fences, no commentary.
 
-{"title":"episode title","episode_type":"sleep_story","duration_minutes":25,"word_count":3000,"script":"full script text here","description":"2–3 sentence episode description for podcast platforms","cover_image_prompt":"15-word Higgsfield prompt — peaceful scene, no humans required"}
+Fields:
+- title: episode title
+- episode_type: one of the 5 types
+- duration_minutes: actual estimated length
+- word_count: word count of script
+- script: full narration script text
+- description_short: ONE sentence — the podcast listing hook (what this episode is and why listen tonight)
+- description_long: 2–3 paragraphs of prose for the episode page "About this story" section. Each paragraph separated by \n\n. Write in the same calm, editorial voice as the script. Describe the setting, the emotional arc, and what the listener will experience — NOT a plot summary.
+- cover_image_prompt: 12-word Higgsfield image prompt. Derive the scene from the episode title and setting. Palette: soft moonlight, muted blues, silver mist, creams. No warm/orange/candlelight. Person optional — if included, write "Caucasian woman 60s". Style: cinematic painterly dreamlike.
+
+{"title":"episode title","episode_type":"sleep_story","duration_minutes":25,"word_count":3000,"script":"full script text here","description_short":"One hook sentence.","description_long":"First paragraph about the episode setting and listening experience.\n\nSecond paragraph adding emotional depth or the specific journey of this episode.\n\nThird optional paragraph on what the listener will feel or carry into sleep.","cover_image_prompt":"bridge moonlight mist soft silver calm cinematic dreamlike peaceful"}

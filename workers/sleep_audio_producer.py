@@ -103,24 +103,30 @@ def run_sleep_audio_slot(slot: dict) -> str:
         "duration_minutes": duration,
         "tone_notes":       slot.get("tone_notes", ""),
     })
-    meta         = skill_result.output_json or {}
-    title        = meta.get("title") or topic
-    description  = meta.get("description", "")
-    script       = meta.get("script", "")
-    image_prompt = meta.get("cover_image_prompt", "")
-    episode_type = meta.get("episode_type", episode_type)
-    duration     = int(meta.get("duration_minutes", duration))
+    meta              = skill_result.output_json or {}
+    title             = meta.get("title") or topic
+    description_short = (meta.get("description_short") or meta.get("description", "")[:150]).strip()
+    description_long  = (meta.get("description_long") or meta.get("description", "")).strip()
+    script            = meta.get("script", "")
+    episode_type      = meta.get("episode_type", episode_type)
+    duration          = int(meta.get("duration_minutes", duration))
     print(f"[sleep_audio] Script ready — {len(script):,} chars — '{title}'")
 
     # ── 2. Cover image ────────────────────────────────────────────────────────
     cover_url = ""
-    if image_prompt:
-        try:
-            from workers.image_gen import generate_cover
-            cover_url = generate_cover(image_prompt).url
-            print(f"[sleep_audio] Cover generated: {cover_url[:70]}...")
-        except Exception as exc:
-            print(f"[sleep_audio] Image gen failed (non-fatal): {exc}")
+    try:
+        from workers.image_gen import generate_cover
+        from workers.episode_deployer import _episode_image_prompt
+        image_prompt = _episode_image_prompt({
+            "episode_type": episode_type,
+            "title": title,
+            "description_short": description_short,
+        })
+        print(f"[sleep_audio] Image prompt: {image_prompt!r}")
+        cover_url = generate_cover(image_prompt).url
+        print(f"[sleep_audio] Cover generated: {cover_url[:70]}...")
+    except Exception as exc:
+        print(f"[sleep_audio] Image gen failed (non-fatal): {exc}")
 
     # ── 3. Shopify CDN upload ─────────────────────────────────────────────────
     cdn_url = cover_url
@@ -139,16 +145,20 @@ def run_sleep_audio_slot(slot: dict) -> str:
         from workers.shopify_publisher import create_page
         from workers.episode_deployer import _build_page_html
         _page_meta = {
-            "title": title, "episode_type": episode_type,
-            "duration_minutes": duration, "description_short": description[:200] if description else "",
-            "description_long": description, "hero_image_url": cdn_url,
-            "buzzsprout_url": None, "script_text": script,
+            "title":             title,
+            "episode_type":      episode_type,
+            "duration_minutes":  duration,
+            "description_short": description_short,
+            "description_long":  description_long,
+            "hero_image_url":    cdn_url,
+            "buzzsprout_url":    None,
+            "script_text":       script,
         }
         result   = create_page(
             title=title,
             body_html=_build_page_html(_page_meta, page_url),
             handle=page_slug,
-            seo_description=(description[:155] if description else None),
+            seo_description=(description_short[:155] if description_short else None),
             is_published=True,
         )
         page_url = result["url"]
