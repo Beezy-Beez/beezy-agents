@@ -498,9 +498,8 @@ def create_campaign_for_issue(issue_number: int) -> dict:
             "pillar":           pillar or "",
             "read_time_min":    read_time_min,
         })
-        r1 = update_index_page("sleep-science-hub", card_html, "hive_mind")
-        r2 = update_index_page("the-hive-mind",     card_html, "hive_mind")
-        print(f"[campaign] Hub updates: sleep-science-hub={r1}  the-hive-mind={r2}")
+        r1 = update_index_page("the-hive-mind", card_html, "hive_mind")
+        print(f"[campaign] Hub update: the-hive-mind={r1}")
     except Exception as exc:
         print(f"[campaign] Hub update failed (non-fatal): {exc}")
 
