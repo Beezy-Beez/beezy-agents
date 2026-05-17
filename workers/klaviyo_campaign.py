@@ -211,8 +211,12 @@ def _create_page_for_issue(issue_number: int) -> dict:
         preview_text,
     ) = row
 
-    missing = [f for f in ("page_title", "page_dek", "page_slug", "long_form_body", "cover_image_url")
-               if not locals().get(f)]
+    _local_vals = {
+        "page_title": page_title, "page_dek": page_dek,
+        "page_slug": page_slug, "long_form_body": long_form_body,
+        "cover_image_url": cover_image_url,
+    }
+    missing = [f for f, v in _local_vals.items() if not v]
     if missing:
         raise ValueError(f"Issue {issue_number} missing required fields for page: {missing}")
 
