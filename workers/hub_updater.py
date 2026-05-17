@@ -6,7 +6,7 @@ issue is published or an audio episode is deployed.
 Hub pages and what feeds them
 ─────────────────────────────
   /pages/the-hive-mind        ← all published Hive Mind issues (full rebuild from DB)
-  /pages/sleep-science-hub    ← Hive Mind issues + sleep_story / soundscape episodes
+  /pages/sleep-science-hub    ← sleep_story / soundscape episodes ONLY (no newsletter issues)
   /pages/meditation-library   ← guided_meditation / affirmation_meditation episodes
   /pages/morning-wellness-hub ← morning_meditation episodes
 
@@ -305,7 +305,7 @@ def add_issue_to_hubs(issue: dict) -> dict[str, str]:
     """Called after a Hive Mind issue's Klaviyo campaign is created (page is live).
 
     Rebuilds /pages/the-hive-mind from all published DB issues (newest first).
-    Prepends this issue's card on /pages/sleep-science-hub.
+    Does NOT touch /pages/sleep-science-hub — that page is for audio content only.
 
     Returns {handle: status} for each hub touched.
     """
@@ -317,23 +317,6 @@ def add_issue_to_hubs(issue: dict) -> dict[str, str]:
         all_issues = [issue]
     all_cards = "".join(_issue_card(i) for i in all_issues)
     results["the-hive-mind"] = _update_hub("the-hive-mind", all_cards)
-
-    # /pages/sleep-science-hub — prepend this issue's card
-    hub_page = _fetch_page("sleep-science-hub")
-    if hub_page:
-        existing  = _extract_items(hub_page["body"] or "")
-        new_items = _issue_card(issue) + ("\n" + existing if existing else "")
-        heading   = _HUB_HEADINGS["sleep-science-hub"]
-        new_body  = _upsert_section(hub_page["body"] or "", heading, new_items)
-        try:
-            _save_page(hub_page["id"], hub_page["title"], new_body)
-            print("[hub_updater] /pages/sleep-science-hub updated with new issue")
-            results["sleep-science-hub"] = "updated"
-        except Exception as exc:
-            print(f"[hub_updater] /pages/sleep-science-hub save failed: {exc}")
-            results["sleep-science-hub"] = f"error: {exc}"
-    else:
-        results["sleep-science-hub"] = "page not found"
 
     return results
 
