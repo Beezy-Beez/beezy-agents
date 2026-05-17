@@ -64,13 +64,12 @@ _EPISODE_LABELS = {
     "soundscape":             "Sleep Soundscape",
 }
 
-# episode_type → hub handles to update (must mirror hub_updater._EPISODE_HUBS exactly)
-# sleep-science-hub: audio content only (sleep_story, soundscape)
-# meditation-library: guided + affirmation meditation
-# morning-wellness-hub: morning meditation
+# episode_type → hub handles to update (mirrors hub_updater._EPISODE_HUBS exactly).
+# sleep-science-hub is intentionally absent: its content is statically curated;
+# sentinel injection there would append below the bottom opt-in (wrong).
 _HUB_MAP: dict[str, list[str]] = {
-    "sleep_story":            ["sleep-science-hub"],
-    "soundscape":             ["sleep-science-hub"],
+    "sleep_story":            [],
+    "soundscape":             [],
     "guided_meditation":      ["meditation-library"],
     "affirmation_meditation": ["meditation-library"],
     "morning_meditation":     ["morning-wellness-hub"],

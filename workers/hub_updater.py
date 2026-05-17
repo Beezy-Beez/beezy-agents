@@ -92,10 +92,12 @@ _EPISODE_TYPE_LABELS = {
     "soundscape":             "Soundscape",
 }
 
-# episode_type → hub handles it belongs to
+# episode_type → hub handles it belongs to.
+# sleep-science-hub is EXCLUDED: its content is statically curated HTML;
+# no sentinel injection allowed there (would appear after the bottom opt-in).
 _EPISODE_HUBS = {
-    "sleep_story":            ["sleep-science-hub"],
-    "soundscape":             ["sleep-science-hub"],
+    "sleep_story":            [],
+    "soundscape":             [],
     "guided_meditation":      ["meditation-library"],
     "affirmation_meditation": ["meditation-library"],
     "morning_meditation":     ["morning-wellness-hub"],
@@ -304,8 +306,8 @@ def _all_published_issues() -> list[dict]:
 def add_issue_to_hubs(issue: dict) -> dict[str, str]:
     """Called after a Hive Mind issue's Klaviyo campaign is created (page is live).
 
-    Rebuilds /pages/the-hive-mind from all published DB issues (newest first).
-    Does NOT touch /pages/sleep-science-hub — that page is for audio content only.
+    1. Rebuilds /pages/the-hive-mind from all published DB issues (newest first).
+    2. Updates the "Latest Issue" featured box on /pages/sleep-science-hub.
 
     Returns {handle: status} for each hub touched.
     """
@@ -318,7 +320,96 @@ def add_issue_to_hubs(issue: dict) -> dict[str, str]:
     all_cards = "".join(_issue_card(i) for i in all_issues)
     results["the-hive-mind"] = _update_hub("the-hive-mind", all_cards)
 
+    # /pages/sleep-science-hub — update only the featured box (via SSH_FEATURED sentinels)
+    results["sleep-science-hub"] = update_ssh_featured_issue(issue)
+
     return results
+
+
+# ── SSH featured-box updater ──────────────────────────────────────────────────
+
+_SSH_FEAT_S = "<!-- SSH_FEATURED_START -->"
+_SSH_FEAT_E = "<!-- SSH_FEATURED_END -->"
+
+
+def _build_featured_html(issue: dict) -> str:
+    """Build the inner HTML for the ssh-featured section."""
+    number   = issue.get("number", "")
+    title    = (issue.get("page_title") or issue.get("subject_line") or "").strip()
+    excerpt  = (issue.get("page_dek") or issue.get("topic_summary") or "").strip()[:280]
+    img      = (issue.get("cover_image_url") or issue.get("shopify_image_url") or "").strip()
+    url      = (issue.get("shopify_page_url") or "#").strip()
+    rt       = issue.get("read_time_min") or 5
+    label    = f"Issue {number:03d}" if number else "Issue"
+
+    img_html = (
+        f'<img src="{img}" alt="The Hive Mind {label}" class="ssh-featured-image">'
+        if img else
+        '<div style="width:100%;aspect-ratio:16/9;background:#f5f0e8;border-radius:12px;"></div>'
+    )
+
+    return (
+        f'<section class="ssh-section">'
+        f'<div class="ssh-featured">'
+        f'<div>{img_html}</div>'
+        f'<div>'
+        f'<div class="ssh-featured-eyebrow">Latest Issue · The Hive Mind</div>'
+        f'<h2 class="ssh-featured-title">{title}</h2>'
+        f'<p class="ssh-featured-excerpt">{excerpt}</p>'
+        f'<a href="{url}" class="ssh-featured-link">Read {label} &rarr; {rt} min read</a>'
+        f'</div>'
+        f'</div>'
+        f'</section>'
+    )
+
+
+def update_ssh_featured_issue(issue: dict) -> str:
+    """Update the 'Latest Issue' featured box on /pages/sleep-science-hub.
+
+    Uses <!-- SSH_FEATURED_START --> / <!-- SSH_FEATURED_END --> sentinels that
+    wrap the featured section inside the page body (never after the bottom opt-in).
+    On first call (no sentinels yet) performs a one-time migration: locates the
+    existing ssh-featured section and wraps it with sentinels + new content.
+
+    Returns 'updated', 'migrated+updated', or 'error: ...'
+    """
+    page = _fetch_page("sleep-science-hub")
+    if not page:
+        print("[hub_updater] sleep-science-hub not found — skipping featured update")
+        return "page not found"
+
+    body        = page["body"] or ""
+    new_inner   = _build_featured_html(issue)
+    new_block   = f"{_SSH_FEAT_S}\n{new_inner}\n{_SSH_FEAT_E}"
+
+    if _SSH_FEAT_S in body and _SSH_FEAT_E in body:
+        # Replace between existing sentinels
+        new_body = re.sub(
+            re.escape(_SSH_FEAT_S) + r".*?" + re.escape(_SSH_FEAT_E),
+            new_block,
+            body,
+            flags=re.DOTALL,
+        )
+        status = "updated"
+    else:
+        # One-time migration: find the existing ssh-featured div and wrap it
+        feat_div = body.find('<div class="ssh-featured">')
+        if feat_div == -1:
+            print("[hub_updater] ssh-featured div not found — cannot update featured box")
+            return "featured div not found"
+        # Find the enclosing <section ...> tag
+        sect_start = body.rfind("<section", 0, feat_div)
+        sect_end   = body.find("</section>", feat_div) + len("</section>")
+        new_body   = body[:sect_start] + new_block + body[sect_end:]
+        status     = "migrated+updated"
+
+    try:
+        _save_page(page["id"], page["title"], new_body)
+        print(f"[hub_updater] sleep-science-hub featured box {status}")
+        return status
+    except Exception as exc:
+        print(f"[hub_updater] sleep-science-hub featured update failed: {exc}")
+        return f"error: {exc}"
 
 
 def _episodes_for_hub(handle: str) -> list[dict]:

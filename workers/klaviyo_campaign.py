@@ -374,7 +374,8 @@ def create_campaign_for_issue(issue_number: int) -> dict:
                    cover_image_url, shopify_image_url,
                    shopify_page_id, shopify_page_url,
                    klaviyo_campaign_id,
-                   pillar, read_time_min
+                   pillar, read_time_min,
+                   page_title
             FROM issues WHERE number = %s
             """,
             (issue_number,),
@@ -391,6 +392,7 @@ def create_campaign_for_issue(issue_number: int) -> dict:
         shopify_page_id, shopify_page_url,
         existing_campaign_id,
         pillar, read_time_min,
+        page_title,
     ) = row
 
     if status == "published":
@@ -484,22 +486,24 @@ def create_campaign_for_issue(issue_number: int) -> dict:
         body=f"Klaviyo: {admin_url}\n\nPage: {page_url}",
     )
 
-    # ── Update hub index pages via lib.index_updater ──────────────────────────
+    # ── Update hub index pages ────────────────────────────────────────────────
+    # add_issue_to_hubs rebuilds /pages/the-hive-mind AND updates the
+    # "Latest Issue" featured box on /pages/sleep-science-hub.
     try:
-        from workers.hub_updater import _issue_card
-        from lib.index_updater import update_index_page
-        card_html = _issue_card({
-            "number":           number,
-            "subject_line":     subject_line,
-            "page_dek":         page_dek,
-            "cover_image_url":  cover_image_url,
+        from workers.hub_updater import add_issue_to_hubs
+        issue_data = {
+            "number":            number,
+            "subject_line":      subject_line,
+            "page_title":        page_title or subject_line,
+            "page_dek":          page_dek,
+            "cover_image_url":   cover_image_url,
             "shopify_image_url": shopify_image_url or "",
-            "shopify_page_url": page_url,
-            "pillar":           pillar or "",
-            "read_time_min":    read_time_min,
-        })
-        r1 = update_index_page("the-hive-mind", card_html, "hive_mind")
-        print(f"[campaign] Hub update: the-hive-mind={r1}")
+            "shopify_page_url":  page_url,
+            "pillar":            pillar or "",
+            "read_time_min":     read_time_min,
+        }
+        hub_results = add_issue_to_hubs(issue_data)
+        print(f"[campaign] Hub update: {hub_results}")
     except Exception as exc:
         print(f"[campaign] Hub update failed (non-fatal): {exc}")
 
