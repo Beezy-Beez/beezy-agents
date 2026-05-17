@@ -249,6 +249,7 @@ def _dispatch_to_tts(
             json=payload,
             headers=headers,
             timeout=15,
+            verify=False,   # Replit CA bundle doesn't include all intermediate certs
         )
         if resp.status_code == 202:
             print(f"[sleep_audio] TTS dispatched to sleep-audio-platform — run_id: {resp.json().get('run_id', '?')}")

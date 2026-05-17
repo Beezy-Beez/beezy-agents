@@ -210,6 +210,57 @@ def test_hive_mind():
 
 
 # =========================================================================
+# TEST 1b -- SLEEP AUDIO PRODUCER → TTS dispatch to sleep-audio-platform
+# =========================================================================
+
+def test_tts_dispatch():
+    print("\n" + "=" * 70)
+    print("TEST 1b: SLEEP AUDIO PRODUCER -- TTS dispatch to sleep-audio-platform")
+    print("=" * 70)
+
+    import os as _os
+    sap_url = _os.environ.get("SLEEP_AUDIO_API_URL", "").rstrip("/")
+    sap_key = _os.environ.get("SLEEP_AUDIO_API_KEY", "")
+
+    if not sap_url:
+        print("[test1b] SLEEP_AUDIO_API_URL not set -- skipping TTS dispatch test")
+        record("TTS DISPATCH (sleep-audio-platform)", BLOCK,
+               "N/A", "N/A", "N/A (SLEEP_AUDIO_API_URL not set)", "N/A",
+               error="SLEEP_AUDIO_API_URL missing -- dispatch would fall back to Slack handoff")
+        return
+
+    print(f"[test1b] Target: {sap_url}/api/v1/generate")
+    print(f"[test1b] Auth:   {'X-API-Key set' if sap_key else 'no API key'}")
+
+    try:
+        from workers.sleep_audio_producer import _dispatch_to_tts
+        ok = _dispatch_to_tts(
+            episode_id="dry_test_dispatch_001",
+            title="Dry Test — TTS Dispatch Check",
+            script="This is a short dry-run script used to verify the dispatch endpoint. No real audio should be generated.",
+            episode_type="sleep_story",
+            duration=1,
+            profile="sleep_story_philosophical",
+            slot_date="2026-06-10",
+            page_url="https://trybeezybeez.com/pages/dry-test-dispatch",
+            description_short="Dry test only.",
+        )
+        if ok:
+            print("[test1b] PASS — sleep-audio-platform returned 202 Accepted")
+            record("TTS DISPATCH (sleep-audio-platform)", PASS,
+                   "N/A", "N/A", "202 Accepted — pipeline running async", "N/A")
+        else:
+            print("[test1b] FAIL — dispatch returned non-202 or connection error (check logs above)")
+            record("TTS DISPATCH (sleep-audio-platform)", FAIL,
+                   "N/A", "N/A", "Non-202 or connection error", "N/A",
+                   error="See console output above for status code / error detail")
+    except Exception as e:
+        print(f"[test1b] ERROR: {e}")
+        traceback.print_exc()
+        record("TTS DISPATCH (sleep-audio-platform)", FAIL, "N/A", "N/A", "N/A", "N/A", str(e)[:120])
+
+
+# =========================================================================
 # TEST 2 -- SLEEP AUDIO (sleep_story)
 # =========================================================================
 
@@ -628,7 +679,7 @@ def main():
     print("Beezy Pipeline Dry Test -- all 6 content types")
     print(f"Date: {date.today().isoformat()}")
 
-    for fn in [test_hive_mind, test_sleep_story, test_guided_meditation,
+    for fn in [test_hive_mind, test_tts_dispatch, test_sleep_story, test_guided_meditation,
                test_product_feature, test_reactivation, test_sms]:
         try:
             fn()
