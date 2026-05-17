@@ -91,6 +91,144 @@ def _slug(title: str) -> str:
     return "episode-" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
 
 
+# ── Sleep story page template (copied from the-bridge-of-incidents) ───────────
+
+_STORY_CSS = """<style>
+.sleep-story-page { background: #faf6ee; padding: 50px 0 70px 0; font-family: 'Lato', Helvetica, Arial, sans-serif; }
+.sleep-story-page .container { max-width: 760px; margin: 0 auto; padding: 0 22px; }
+.sleep-story-page .eyebrow { font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; color: #6b5947; font-weight: 600; margin: 0 0 14px 0; }
+.sleep-story-page h1 { font-family: 'Cormorant Garamond', Georgia, serif; font-size: 52px; line-height: 1.05; font-weight: 500; font-style: italic; color: #87401C; margin: 0 0 14px 0; letter-spacing: -0.5px; }
+.sleep-story-page .lead { font-size: 19px; line-height: 1.5; color: #2a1f15; margin: 0 0 32px 0; font-weight: 400; }
+.sleep-story-page .hero-image { display: block; width: 100%; max-width: 760px; height: auto; border-radius: 4px; margin: 0 0 36px 0; }
+.sleep-story-page .audio-wrap { background: #f3ead7; border: 1px solid #e8dfd0; border-radius: 4px; padding: 20px; margin: 0 0 36px 0; }
+.sleep-story-page .audio-wrap iframe { display: block; width: 100%; border: 0; min-height: 200px; }
+.sleep-story-page .prose p { font-size: 17px; line-height: 1.7; color: #2a1f15; margin: 0 0 18px 0; }
+.sleep-story-page .prose p em { font-style: italic; color: #87401C; }
+.sleep-story-page .divider { height: 1px; background: #e8dfd0; margin: 48px 0 48px 0; }
+.sleep-story-page h2 { font-family: 'Cormorant Garamond', Georgia, serif; font-size: 34px; line-height: 1.15; font-weight: 500; font-style: italic; color: #87401C; margin: 0 0 8px 0; }
+.sleep-story-page .section-sub { font-size: 15px; color: #6b5947; margin: 0 0 28px 0; }
+.sleep-story-page .products-grid { display: flex; gap: 18px; margin: 0 0 12px 0; flex-wrap: wrap; }
+.sleep-story-page .product-card { flex: 1; min-width: 200px; background: #ffffff; border: 1px solid #e8dfd0; border-radius: 4px; padding: 18px; text-align: center; }
+.sleep-story-page .product-card img { display: block; width: 100%; max-width: 180px; height: auto; margin: 0 auto 14px auto; }
+.sleep-story-page .product-card .name { font-family: 'Cormorant Garamond', Georgia, serif; font-size: 20px; font-style: italic; color: #2a1f15; margin: 0 0 4px 0; line-height: 1.25; }
+.sleep-story-page .product-card .price { font-size: 14px; color: #6b5947; margin: 0 0 14px 0; }
+.sleep-story-page .product-card .btn { display: inline-block; background: #87401C; color: #ffffff; padding: 10px 22px; font-size: 13px; font-weight: 600; letter-spacing: 0.5px; border-radius: 2px; text-decoration: none; text-transform: uppercase; }
+.sleep-story-page .more-content-card { background: #f3ead7; border: 1px solid #e8dfd0; border-radius: 4px; padding: 36px; text-align: center; margin: 16px 0 0 0; }
+.sleep-story-page .more-content-card h3 { font-family: 'Cormorant Garamond', Georgia, serif; font-size: 28px; font-style: italic; color: #87401C; margin: 0 0 12px 0; }
+.sleep-story-page .more-content-card p { font-size: 16px; color: #2a1f15; margin: 0 0 22px 0; }
+.sleep-story-page .more-content-card .btn-large { display: inline-block; background: #87401C; color: #ffffff; padding: 14px 32px; font-size: 14px; font-weight: 600; letter-spacing: 0.8px; border-radius: 2px; text-decoration: none; text-transform: uppercase; }
+@media screen and (max-width: 600px) {
+  .sleep-story-page h1 { font-size: 36px !important; }
+  .sleep-story-page .lead { font-size: 17px !important; }
+  .sleep-story-page h2 { font-size: 26px !important; }
+  .sleep-story-page .products-grid { flex-direction: column; }
+  .sleep-story-page .product-card { min-width: 100%; }
+}
+</style>"""
+
+# Fixed product grid — same 3 products as the live template
+_STORY_PRODUCTS = """      <div class="product-card">
+        <a href="/products/cinnamon-cbn-honey" style="text-decoration: none; color: inherit;">
+          <img src="https://cdn.shopify.com/s/files/1/0616/0616/6777/files/Honey_CBN_Cinnamon__FOR_WEB_IMAGE2.png?v=1733859657" alt="Cinnamon CBN Sleep Honey">
+          <p class="name">Cinnamon CBN Sleep Honey</p>
+          <p class="price">$64.95</p>
+          <span class="btn">Shop now</span>
+        </a>
+      </div>
+
+      <div class="product-card">
+        <a href="/products/botanical-extract-lotion" style="text-decoration: none; color: inherit;">
+          <img src="https://cdn.shopify.com/s/files/1/0616/0616/6777/files/beezy-beez-lotion.webp?v=1699816159" alt="Botanical Extract Lotion">
+          <p class="name">Botanical Extract Lotion</p>
+          <p class="price">$59.95</p>
+          <span class="btn">Shop now</span>
+        </a>
+      </div>
+
+      <div class="product-card">
+        <a href="/products/caramel-flavor-honey" style="text-decoration: none; color: inherit;">
+          <img src="https://cdn.shopify.com/s/files/1/0616/0616/6777/files/CaramelHoney-WhiteBackground_43a30059-100e-4c98-864d-08a711a3c1fd.jpg?v=1715785132" alt="Caramel Botanical Extract Honey">
+          <p class="name">Caramel Botanical Honey</p>
+          <p class="price">From $49</p>
+          <span class="btn">Shop now</span>
+        </a>
+      </div>"""
+
+
+def _page_html_story(meta: dict[str, Any], page_url: str = "") -> str:
+    """Sleep story page — exact structure of the-bridge-of-incidents."""
+    title       = meta.get("title", "")
+    duration    = meta.get("duration_minutes")
+    desc_short  = (meta.get("description_short") or "").strip()
+    desc_long   = (meta.get("description_long") or desc_short).strip()
+    embed_raw   = meta.get("buzzsprout_embed_url") or meta.get("buzzsprout_url") or ""
+    cover_image = (meta.get("hero_image_url") or meta.get("cover_image_url") or "").strip()
+
+    dur_str = f"approximately {duration} minutes" if duration else "approximately 25 minutes"
+    lead    = f"{dur_str.capitalize()}. {desc_short}" if desc_short else f"{dur_str.capitalize()}. Tonight's new story from the Sleep Better Podcast."
+
+    # Hero image
+    hero_html = (
+        f'    <img class="hero-image" src="{cover_image}" alt="{title}">\n'
+        if cover_image else ""
+    )
+
+    # Audio embed or placeholder
+    if embed_raw:
+        sep = "&" if "?" in embed_raw else "?"
+        if "client_source=large_player" not in embed_raw:
+            embed_src = f"{embed_raw}{sep}client_source=large_player&iframe=true"
+        else:
+            embed_src = embed_raw
+        audio_html = (
+            f'      <iframe src="{embed_src}" loading="lazy" frameborder="0" '
+            f'scrolling="no" title="Beezy Beez Sleep Story: {title}"></iframe>'
+        )
+    else:
+        audio_html = (
+            '      <p style="font-size:16px;color:#6b5947;font-style:italic;">'
+            "Audio coming shortly — bookmark this page or return from your email link.</p>"
+        )
+
+    # Prose paragraphs from description_long
+    paras = [p.strip() for p in desc_long.split("\n\n") if p.strip()]
+    if not paras:
+        paras = [desc_short] if desc_short else [""]
+    prose_html = "\n\n".join(f"      <p>{p}</p>" for p in paras)
+
+    return (
+        _STORY_CSS + "\n\n"
+        '<div class="sleep-story-page">\n'
+        '  <div class="container">\n\n'
+        '    <p class="eyebrow">Sleep Better Podcast · A Beezy Beez story</p>\n\n'
+        f'    <h1>{title}</h1>\n\n'
+        f'    <p class="lead">{lead}</p>\n\n'
+        + hero_html
+        + '    <div class="audio-wrap">\n'
+        + audio_html + "\n"
+        + '    </div>\n\n'
+        + '    <div class="prose">\n'
+        + prose_html + "\n"
+        + '    </div>\n\n'
+        + '    <div class="divider"></div>\n\n'
+        + '    <h2>Pair this story with our sleep stack</h2>\n'
+        + '    <p class="section-sub">The story takes you under. The stack keeps you there.</p>\n\n'
+        + '    <div class="products-grid">\n'
+        + _STORY_PRODUCTS + "\n"
+        + '    </div>\n\n'
+        + '    <div class="divider"></div>\n\n'
+        + '    <div class="more-content-card">\n'
+        + '      <h3>More sleep content from Beezy Beez</h3>\n'
+        + '      <p>Sleep science writing, guided meditations, and more stories like this one — all in our editorial hub.</p>\n'
+        + '      <a href="https://trybeezybeez.com/pages/sleep-science-hub" class="btn-large">Click Here for More Sleep Content</a>\n'
+        + '    </div>\n\n'
+        + '  </div>\n'
+        + '</div>\n'
+    )
+
+
+# ── Meditation/soundscape page template (copied from sleep-meditation-track-1) ─
+
 _EPIS_CSS = (
     "<style>"
     ".epis-page{--rust:#87401C;--rust-darker:#4f2611;--cream:#faf6ee;--cream-warm:#f3ead7;"
@@ -198,27 +336,22 @@ _EPIS_SUBSCRIBER_JS = (
     ".catch(function(){t.disabled=!1;t.textContent=o});});});})();</script>"
 )
 
-# Breadcrumb hub config per episode_type
+# Breadcrumb config per episode_type: (hub_label, hub_url, crumb_label)
 _CRUMB_CONFIG: dict[str, tuple[str, str, str]] = {
-    # episode_type → (hub_label, hub_url, crumb_label)
-    "sleep_story":            ("Sleep Science", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub", "Sleep Story"),
     "soundscape":             ("Sleep Science", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub", "Sleep Soundscape"),
     "guided_meditation":      ("Meditation Library", f"{_SHOPIFY_DOMAIN}/pages/meditation-library", "Guided Sleep Meditation"),
     "affirmation_meditation": ("Meditation Library", f"{_SHOPIFY_DOMAIN}/pages/meditation-library", "Affirmation Meditation"),
     "morning_meditation":     ("Morning Wellness", f"{_SHOPIFY_DOMAIN}/pages/morning-wellness-hub", "Guided Morning Meditation"),
 }
 
-# Back link per episode_type
 _BACK_CONFIG: dict[str, tuple[str, str]] = {
-    "sleep_story":  ("the Sleep Science Hub", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub"),
-    "soundscape":   ("the Sleep Science Hub", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub"),
+    "soundscape":             ("the Sleep Science Hub", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub"),
     "guided_meditation":      ("the Meditation Library", f"{_SHOPIFY_DOMAIN}/pages/meditation-library"),
     "affirmation_meditation": ("the Meditation Library", f"{_SHOPIFY_DOMAIN}/pages/meditation-library"),
     "morning_meditation":     ("the Morning Wellness Hub", f"{_SHOPIFY_DOMAIN}/pages/morning-wellness-hub"),
 }
 
 _ABOUT_LABEL: dict[str, str] = {
-    "sleep_story":            "sleep story",
     "soundscape":             "soundscape",
     "guided_meditation":      "meditation",
     "affirmation_meditation": "meditation",
@@ -226,7 +359,6 @@ _ABOUT_LABEL: dict[str, str] = {
 }
 
 _TRANSCRIPT_META: dict[str, str] = {
-    "sleep_story":            "Full transcript of this sleep story, lightly edited for readability.",
     "soundscape":             "Notes on this soundscape.",
     "guided_meditation":      "Full transcript of this guided meditation, lightly edited for readability.",
     "affirmation_meditation": "Full transcript of this affirmation meditation, lightly edited for readability.",
@@ -234,22 +366,22 @@ _TRANSCRIPT_META: dict[str, str] = {
 }
 
 
-def _build_page_html(meta: dict[str, Any], page_url: str = "") -> str:
-    """Build episode page body HTML using the full epis-page design system."""
+def _page_html_meditation(meta: dict[str, Any], page_url: str = "") -> str:
+    """Meditation/soundscape page — exact structure of sleep-meditation-track-1."""
     import json as _json
 
     title        = meta.get("title", "")
-    episode_type = meta.get("episode_type", "sleep_story")
+    episode_type = meta.get("episode_type", "guided_meditation")
     duration     = meta.get("duration_minutes")
     desc_short   = (meta.get("description_short") or "").strip()
     desc_long    = (meta.get("description_long") or desc_short).strip()
     embed_raw    = meta.get("buzzsprout_embed_url") or meta.get("buzzsprout_url") or ""
     script_text  = (meta.get("script_text") or "").strip()
-    cover_image  = (meta.get("hero_image_url") or meta.get("cover_image_url") or "").strip()
 
     label         = _EPISODE_LABELS.get(episode_type, episode_type.replace("_", " ").title())
     dur_str       = f" · {duration} min" if duration else ""
-    eyebrow       = f"Sleep Better Podcast · {title}{dur_str}"
+    # Eyebrow: "Sleep Better Podcast · <type label> · <duration>" — NOT the title
+    eyebrow       = f"Sleep Better Podcast · {label}{dur_str}"
 
     hub_label, hub_url, crumb_label = _CRUMB_CONFIG.get(
         episode_type,
@@ -262,28 +394,30 @@ def _build_page_html(meta: dict[str, Any], page_url: str = "") -> str:
     transcript_meta = _TRANSCRIPT_META.get(episode_type, "Full transcript, lightly edited for readability.")
     about_label = _ABOUT_LABEL.get(episode_type, label.lower())
 
-    # Buzzsprout embed URL — add small_player params if missing
-    if embed_raw and "client_source=small_player" not in embed_raw:
+    # Buzzsprout embed — small_player params as on the live page
+    if embed_raw:
         sep = "&" if "?" in embed_raw else "?"
-        embed_src = f"{embed_raw}{sep}client_source=small_player&iframe=true"
+        if "client_source=small_player" not in embed_raw:
+            embed_src = f"{embed_raw}{sep}client_source=small_player&iframe=true"
+        else:
+            embed_src = embed_raw
     else:
-        embed_src = embed_raw
+        embed_src = ""
 
-    # iframe title attribute
     iframe_title = f"Sleep Better Podcast - {label} - {title}"
-
-    # Extract Buzzsprout episode ID for JSON-LD MP3 URL
     _ep_match = re.search(r"/episodes/(\d+)", embed_raw)
-    mp3_url = f"https://www.buzzsprout.com/2292260/episodes/{_ep_match.group(1)}.mp3" if _ep_match else ""
+    mp3_url = (
+        f"https://www.buzzsprout.com/2292260/episodes/{_ep_match.group(1)}.mp3"
+        if _ep_match else ""
+    )
 
-    # Description paragraphs for "About this" section
-    about_paras = [p.strip() for p in desc_long.split("\n\n") if p.strip()] if desc_long else []
+    # About paragraphs
+    about_paras = [p.strip() for p in desc_long.split("\n\n") if p.strip()]
     about_html  = "\n".join(f"<p>{p}</p>" for p in about_paras) if about_paras else f"<p>{desc_short}</p>"
 
     # Transcript paragraphs
     if script_text:
         t_paras = [p.strip() for p in script_text.split("\n\n") if p.strip()]
-        # Fall back to single-newline split if no double-newlines found
         if len(t_paras) <= 1:
             t_paras = [p.strip() for p in script_text.split("\n") if p.strip()]
         transcript_html = "\n".join(f"<p>{p}</p>" for p in t_paras)
@@ -333,19 +467,16 @@ def _build_page_html(meta: dict[str, Any], page_url: str = "") -> str:
         _EPIS_CSS,
         _EPIS_FONTS,
         '<article class="epis-page"><div class="epis-wrap">',
-        # Breadcrumb
         f'<nav class="epis-crumb" aria-label="Breadcrumb">'
         f'<a href="{_SHOPIFY_DOMAIN}/">Home</a>'
         f' <span class="sep">›</span> '
         f'<a href="{hub_url}">{hub_label}</a>'
         f' <span class="sep">›</span> {crumb_label}</nav>',
-        # Hero — text only, no cover image (cover image is for emails/hub cards only)
         f'<div class="epis-hero" role="banner">'
         f'<p class="epis-eyebrow">{eyebrow}</p>'
         f'<h1 class="epis-h1">{title}</h1>'
         f'<p class="epis-dek">{desc_short}</p>'
         f'</div>',
-        # Audio player
         f'<section class="epis-audio"><p class="epis-audio-label">Listen</p>'
         + (
             f'<iframe src="{embed_src}" loading="lazy" width="100%" height="200" '
@@ -358,39 +489,36 @@ def _build_page_html(meta: dict[str, Any], page_url: str = "") -> str:
           f'<a href="https://podcasts.apple.com/podcast/id1722583143" target="_blank" rel="noopener">Apple Podcasts</a>, or '
           f'<a href="https://open.spotify.com/show/45Y1QPOOMiAhAWjAREkTkZ" target="_blank" rel="noopener">Spotify</a>.</p>'
           f'</section>',
-        # About section
         f'<section class="epis-section"><h2 class="epis-h2">About this {about_label}</h2>'
         f'{about_html}</section>',
-        # Newsletter top
         _EPIS_NEWSLETTER_FORM.format(source="meditation-page-top", extra_style=""),
-        # Transcript
         f'<section class="epis-transcript" aria-labelledby="epis-transcript-h">'
         f'<h2 id="epis-transcript-h" class="epis-h2">Transcript</h2>'
         f'<p class="epis-transcript-meta">{transcript_meta}</p>'
         f'<div class="epis-transcript-body">{transcript_html}</div></section>',
-        # About Beezy Beez context
         f'<section class="epis-context"><h2 class="epis-h2">About Beezy Beez</h2>'
         f'<p>This {label.lower()} comes from the Sleep Better Podcast, produced by <strong>Beezy Beez</strong> — '
         f'a small wellness brand making botanical extract honey for women navigating sleep changes after 50.</p>'
         f'<p>If a teaspoon of honey before bed is part of your wind-down, our '
         f'<a href="{_SHOPIFY_DOMAIN}/products/honey-sub">Botanical Extract Infused Honey</a> '
         f'is what we make for exactly that moment.</p></section>',
-        # Product CTA
         _EPIS_PRODUCT_CTA,
-        # Newsletter bottom
         _EPIS_NEWSLETTER_FORM.format(source="meditation-page-bottom", extra_style=' style="margin-top:48px;"'),
-        # Archive link
         _EPIS_ARCHIVE_LINK,
-        # Back link
         f'<p class="epis-back">← <a href="{back_url}">Back to {back_label}</a></p>',
         '</div></article>',
-        # JSON-LD
         f'<script type="application/ld+json">{jsonld_episode}</script>',
         f'<script type="application/ld+json">{jsonld_breadcrumb}</script>',
-        # Subscriber detection JS
         _EPIS_SUBSCRIBER_JS,
     ]
     return "\n".join(parts)
+
+
+def _build_page_html(meta: dict[str, Any], page_url: str = "") -> str:
+    """Dispatch to the correct page template based on episode_type."""
+    if meta.get("episode_type", "sleep_story") == "sleep_story":
+        return _page_html_story(meta, page_url)
+    return _page_html_meditation(meta, page_url)
 
 
 def _create_klaviyo_draft(

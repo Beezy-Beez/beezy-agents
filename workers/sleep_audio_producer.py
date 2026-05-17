@@ -29,45 +29,8 @@ _EPISODE_LABELS = {
     "soundscape":             "Sleep Soundscape",
 }
 
-_HUB_URLS = {
-    "sleep_story":            f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub",
-    "soundscape":             f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub",
-    "guided_meditation":      f"{_SHOPIFY_DOMAIN}/pages/meditation-library",
-    "affirmation_meditation": f"{_SHOPIFY_DOMAIN}/pages/meditation-library",
-    "morning_meditation":     f"{_SHOPIFY_DOMAIN}/pages/morning-wellness-hub",
-}
-
-
 def _slug(title: str) -> str:
     return "episode-" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-
-
-def _page_html(title: str, description: str, episode_type: str,
-               duration_minutes: int | None, cover_url: str) -> str:
-    label   = _EPISODE_LABELS.get(episode_type, "Sleep Audio")
-    hub_url = _HUB_URLS.get(episode_type, f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub")
-    dur     = f" · {duration_minutes} min" if duration_minutes else ""
-    cover   = (
-        f'<img src="{cover_url}" alt="{title}" '
-        f'style="width:100%;max-width:680px;height:auto;display:block;'
-        f'border-radius:8px;margin:0 0 28px 0;"/>'
-        if cover_url else ""
-    )
-    return (
-        f'<div style="max-width:680px;margin:0 auto;padding:40px 20px;'
-        f'font-family:Georgia,serif;color:#2c2417;background:#faf6ee;">'
-        f'{cover}'
-        f'<p style="margin:0 0 8px 0;font-size:13px;letter-spacing:1.5px;'
-        f'text-transform:uppercase;color:#8b7355;">{label}{dur}</p>'
-        f'<h1 style="margin:0 0 20px 0;font-size:32px;line-height:1.2;color:#2c2417;">{title}</h1>'
-        f'<p style="font-size:18px;line-height:1.75;color:#2c2417;margin:0 0 32px 0;">{description}</p>'
-        f'<p style="font-size:16px;line-height:1.75;color:#5a4a3a;font-style:italic;">'
-        f'Audio coming shortly — bookmark this page or return from your email link.</p>'
-        f'<p style="margin:32px 0 0 0;">'
-        f'<a href="{hub_url}" style="color:#8b4513;font-weight:bold;text-decoration:none;">'
-        f'&rarr; Browse the full audio library</a>'
-        f'</p></div>'
-    )
 
 
 def _save_stub_and_update_hubs(episode_meta: dict) -> str:
@@ -174,9 +137,16 @@ def run_sleep_audio_slot(slot: dict) -> str:
     page_url  = f"{_SHOPIFY_DOMAIN}/pages/{page_slug}"
     try:
         from workers.shopify_publisher import create_page
+        from workers.episode_deployer import _build_page_html
+        _page_meta = {
+            "title": title, "episode_type": episode_type,
+            "duration_minutes": duration, "description_short": description[:200] if description else "",
+            "description_long": description, "hero_image_url": cdn_url,
+            "buzzsprout_url": None, "script_text": script,
+        }
         result   = create_page(
             title=title,
-            body_html=_page_html(title, description, episode_type, duration, cdn_url),
+            body_html=_build_page_html(_page_meta, page_url),
             handle=page_slug,
             seo_description=(description[:155] if description else None),
             is_published=True,

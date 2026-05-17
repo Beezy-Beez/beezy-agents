@@ -1,283 +1,392 @@
 """
 Email HTML builder for sleep audio episodes.
 
-Produces two variants from the same metadata:
-  Email A — Engaged Customers (discovery tone, excl. Active Seal)
-  Email B — Active Seal members (exclusive/members-only tone)
+Structure copied exactly from the Bridge of Incidents live campaigns:
+  YfBXg2 — Active Seal (members-first tone, "tonight's story is up")
+  RQrY6N — Engaged Customers (discovery tone, "tonight, a sleep story")
 
-Returns (email_a_html, email_b_html) as a tuple.
-
-Metadata keys used:
-  title, episode_type, duration_minutes, cover_image_url,
-  shopify_page_url, buzzsprout_url
+Returns (email_a_html, email_b_html) where:
+  email_a → Engaged Customers excl Active Seal
+  email_b → Active Seal
 """
 from __future__ import annotations
 
-SHOPIFY_DOMAIN = "https://trybeezybeez.com"
-PRODUCT_URL    = f"{SHOPIFY_DOMAIN}/pages/bf-collection"
-FROM_EMAIL     = "help@trybeezybeez.com"
+_LOGO_URL = (
+    "https://cdn05.zipify.com/SgNn6ZTj7JLGAGruNGAZ7U0KjAY=/"
+    "fit-in/3840x0/a9688067ccf748cc883f028b3e876c98/beezy-beez-logo.webp"
+)
 
-_EPISODE_LABELS = {
-    "sleep_story":            "Sleep Story",
-    "guided_meditation":      "Guided Meditation",
-    "affirmation_meditation": "Affirmation Meditation",
-    "morning_meditation":     "Morning Meditation",
-    "soundscape":             "Sleep Soundscape",
+_CSS = """body, table, td, p, a {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale
+    }
+body {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    background: #faf6ee
+    }
+table {
+    border-collapse: collapse;
+    mso-table-lspace: 0;
+    mso-table-rspace: 0
+    }
+img {
+    border: 0;
+    outline: none;
+    text-decoration: none;
+    -ms-interpolation-mode: bicubic
+    }
+a {
+    text-decoration: none
+    }
+.container {
+    width: 600px;
+    max-width: 100%;
+    margin: 0 auto;
+    background: #faf6ee
+    }
+h1 {
+    font-family: "Cormorant Garamond", Georgia, serif;
+    font-size: 36px;
+    line-height: 1.15;
+    font-weight: 500;
+    font-style: italic;
+    color: #87401C;
+    margin: 0
+    }
+p {
+    font-family: Lato, Helvetica, Arial, sans-serif;
+    font-size: 17px;
+    line-height: 1.6;
+    color: #2a1f15;
+    margin: 0 0 18px 0
+    }
+.eyebrow {
+    font-family: Lato, Helvetica, Arial, sans-serif;
+    font-size: 12px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: #6b5947;
+    font-weight: 600
+    }
+.btn {
+    display: inline-block;
+    background: #87401C;
+    color: #fff !important;
+    padding: 14px 32px;
+    font-family: Lato, Helvetica, Arial, sans-serif;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    border-radius: 2px;
+    text-decoration: none
+    }
+@media screen and (max-width: 600px) {
+    .container {
+        width: 100% !important
+        }
+    .px {
+        padding-left: 20px !important;
+        padding-right: 20px !important
+        }
+    h1 {
+        font-size: 28px !important
+        }
+    p {
+        font-size: 16px !important
+        }
+    }"""
+
+# ── Per-type copy ─────────────────────────────────────────────────────────────
+
+_H1_A = {
+    "sleep_story":            "tonight, a sleep story",
+    "soundscape":             "something new for tonight",
+    "guided_meditation":      "tonight, a short meditation",
+    "affirmation_meditation": "something to carry into sleep",
+    "morning_meditation":     "start tomorrow differently",
 }
 
-_EPISODE_HUB = {
-    "sleep_story":            ("Sleep Science Hub",    f"{SHOPIFY_DOMAIN}/pages/sleep-science-hub"),
-    "soundscape":             ("Sleep Science Hub",    f"{SHOPIFY_DOMAIN}/pages/sleep-science-hub"),
-    "guided_meditation":      ("Meditation Library",   f"{SHOPIFY_DOMAIN}/pages/meditation-library"),
-    "affirmation_meditation": ("Meditation Library",   f"{SHOPIFY_DOMAIN}/pages/meditation-library"),
-    "morning_meditation":     ("Morning Wellness Hub", f"{SHOPIFY_DOMAIN}/pages/morning-wellness-hub"),
+_H1_B = {
+    "sleep_story":            "tonight's story is up",
+    "soundscape":             "tonight's soundscape is ready",
+    "guided_meditation":      "your new meditation is live",
+    "affirmation_meditation": "a new affirmation session",
+    "morning_meditation":     "your morning session is live",
 }
 
-# Short hook copy keyed by episode_type — discovery tone (Email A)
-_HOOK_A = {
+# Body p1 — context/intro (Email A, discovery tone)
+_INTRO_A = {
     "sleep_story": (
-        "Tonight we added a new sleep story to the library. "
-        "Put on headphones, close your eyes, and let it carry you."
+        "We don't talk about the Sleep Better Podcast much. It's our quieter project"
+        " — slow stories paced for breath, narrated softly, designed to take you under."
     ),
     "soundscape": (
-        "A new soundscape is ready — crafted to mask the noise that keeps you awake "
-        "and settle your nervous system before sleep."
+        "The Sleep Better library just got a new soundscape — engineered layered audio"
+        " to ease you across the threshold into sleep."
     ),
     "guided_meditation": (
-        "A new guided meditation is waiting for you. "
-        "Twenty minutes of intentional stillness, built for the moments when your mind won't quiet down."
+        "The Sleep Better library has a new guided meditation waiting for you."
+        " Intentional stillness, built for the moments when your mind won't quiet down."
     ),
     "affirmation_meditation": (
-        "We've added a new affirmation meditation to the library — "
-        "designed to replace the mental loop with something steadier."
+        "We've added a new affirmation meditation to the Sleep Better library"
+        " — designed to replace the mental loop with something steadier."
     ),
     "morning_meditation": (
-        "Start tomorrow differently. A new morning meditation is ready — "
-        "grounding, brief, and designed to set the tone before the day takes over."
+        "A new morning session just landed in the Sleep Better library."
+        " Grounding, brief, designed to set the tone before the day takes over."
     ),
 }
 
-# Short hook copy keyed by episode_type — members-only tone (Email B)
-_HOOK_B = {
+# Body p3 — CTA hook (Email A)
+_CTA_A = {
+    "sleep_story":            "If tonight's the night you can't quite settle, press play.",
+    "soundscape":             "Press play, close your eyes, and let the sound do the rest.",
+    "guided_meditation":      "If your mind is still running tonight, this is where to go.",
+    "affirmation_meditation": "Press play when you're in bed. Let it replace the loop.",
+    "morning_meditation":     "Set it up now. Play it when you wake up.",
+}
+
+# Body p2 — member context (Email B, Active Seal)
+_MEMBER_B = {
     "sleep_story": (
-        "Your Hive Club library just grew. A new sleep story is live — "
-        "available first to active members, before the wider send."
+        "As an Active Seal member you get every episode the moment it lands."
+        " Tonight that's this one."
     ),
-    "soundscape": (
-        "Members only — a new soundscape dropped tonight. "
-        "Engineered layered audio to ease you across the threshold into sleep."
-    ),
-    "guided_meditation": (
-        "New for Hive Club: a guided meditation session is live in your library. "
-        "Members get first access before the general send."
-    ),
-    "affirmation_meditation": (
-        "A new affirmation meditation is live for Hive Club members. "
-        "Your library grows with every episode — this one's available to you first."
-    ),
-    "morning_meditation": (
-        "Your Hive Club morning routine just got an addition. "
-        "New meditation — available to members now, general release tomorrow."
-    ),
+    "soundscape":             "Available to Active Seal members first. Press play.",
+    "guided_meditation":      "As an Active Seal member you get this the moment it lands.",
+    "affirmation_meditation": "As an Active Seal member you get this the moment it lands.",
+    "morning_meditation":     "Available to you now, before the general send.",
 }
 
-_CSS = """
-body{margin:0;padding:0;background:#faf6ee;font-family:Georgia,"Times New Roman",serif;
-color:#2c2417;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%}
-table{border-collapse:collapse}
-img{display:block;border:0;outline:none;text-decoration:none;-ms-interpolation-mode:bicubic}
-a{color:#8b4513;text-decoration:underline}
-.hidden-preheader{display:none !important;visibility:hidden;mso-hide:all;font-size:1px;
-line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden}
-@media screen and (max-width:600px){
-  .container{width:100% !important;max-width:100% !important}
-  .px-mobile{padding-left:22px !important;padding-right:22px !important}
-  h1.headline{font-size:26px !important;line-height:1.2 !important}
-  .cta-button{font-size:17px !important;padding:18px 32px !important}
+# Body p3 — CTA hook (Email B)
+_CTA_B = {
+    "sleep_story":            "Press play, lay back, and let it carry you under.",
+    "soundscape":             "Your library, your night.",
+    "guided_meditation":      "When you're ready, press play.",
+    "affirmation_meditation": "Let it carry you the rest of the way.",
+    "morning_meditation":     "Start tomorrow right.",
 }
-"""
+
+_SUBTITLE_A = {
+    "sleep_story":
+        "Sleep Better Podcast · A slow walk into sleep · ~{dur} min",
+    "soundscape":
+        "Sleep Better Podcast · Sleep soundscape · ~{dur} min",
+    "guided_meditation":
+        "Sleep Better Podcast · Guided meditation · ~{dur} min",
+    "affirmation_meditation":
+        "Sleep Better Podcast · Affirmation session · ~{dur} min",
+    "morning_meditation":
+        "Sleep Better Podcast · Morning session · ~{dur} min",
+}
+
+_SUBTITLE_B = {
+    "sleep_story":
+        "Sleep Better Podcast · Tonight's new story · ~{dur} min",
+    "soundscape":
+        "Sleep Better Podcast · New soundscape · ~{dur} min",
+    "guided_meditation":
+        "Sleep Better Podcast · Member exclusive · ~{dur} min",
+    "affirmation_meditation":
+        "Sleep Better Podcast · Active Seal exclusive · ~{dur} min",
+    "morning_meditation":
+        "Sleep Better Podcast · Member exclusive · ~{dur} min",
+}
+
+_CTA_LABEL_A = {
+    "sleep_story":            "Play tonight's story",
+    "soundscape":             "Play tonight's soundscape",
+    "guided_meditation":      "Open tonight's meditation",
+    "affirmation_meditation": "Play the affirmation",
+    "morning_meditation":     "Open the morning session",
+}
+
+_CTA_LABEL_B = {
+    "sleep_story":            "Play tonight's story",
+    "soundscape":             "Play the soundscape",
+    "guided_meditation":      "Play your meditation",
+    "affirmation_meditation": "Play the affirmation",
+    "morning_meditation":     "Play your morning session",
+}
 
 
-def _cover_block(img_url: str, label: str) -> str:
-    if not img_url:
-        return ""
-    return (
-        f'<tr><td style="padding:0 0 28px 0;">'
-        f'<img alt="{label}" src="{img_url}" '
-        f'style="width:100%;max-width:600px;height:auto;display:block;" width="600"/>'
-        f'</td></tr>'
-    )
-
-
-def _build_html(
+def _render(
     *,
-    title: str,
-    episode_type: str,
-    duration_minutes: int | None,
-    cover_url: str,
+    preview_text: str,
+    eyebrow: str,
+    h1: str,
+    body_p1: str,
+    body_p2: str,
+    body_p3: str,
+    hero_url: str,
+    hero_alt: str,
     page_url: str,
-    hook_text: str,
-    signoff_line1: str,
-    signoff_line2: str,
-    preheader: str,
+    card_title: str,
+    card_subtitle: str,
+    cta_label: str,
+    footer_text: str,
 ) -> str:
-    label      = _EPISODE_LABELS.get(episode_type, episode_type.replace("_", " ").title())
-    hub_name, hub_url = _EPISODE_HUB.get(episode_type, ("Sleep Science Hub", f"{SHOPIFY_DOMAIN}/pages/sleep-science-hub"))
+    hero_row = ""
+    if hero_url:
+        hero_row = (
+            '<tr><td class="px" style="padding: 24px 40px 24px 40px;">'
+            '<a href="' + page_url + '" style="text-decoration: none; border: 0;">'
+            '<img alt="' + hero_alt + '" src="' + hero_url + '" '
+            'style="display: block; width: 100%; max-width: 520px; height: auto; '
+            'border-radius: 4px; border: 0;" width="520"/>'
+            "</a></td></tr>\n"
+        )
 
-    meta_parts = [label]
-    if duration_minutes:
-        meta_parts.append(f"{duration_minutes} min")
-    meta_line = " · ".join(meta_parts)
-
-    cover   = _cover_block(cover_url, label)
-    unsub   = "{%" + " unsubscribe %}"
-
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<meta content="width=device-width, initial-scale=1" name="viewport"/>
-<title>{title}</title>
-<style>{_CSS}</style>
-</head>
-<body>
-<div class="hidden-preheader">{preheader}</div>
-<table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background:#faf6ee;" width="100%">
-<tr>
-<td align="center" style="padding:32px 12px 48px 12px;">
-<table border="0" cellpadding="0" cellspacing="0" class="container" role="presentation" style="width:600px;max-width:600px;background:#fffdf7;border-radius:8px;" width="600">
-
-<tr>
-<td class="px-mobile" style="padding:40px 40px 0 40px;">
-<p style="margin:0;font-size:13px;letter-spacing:1.5px;text-transform:uppercase;color:#8b7355;font-family:Georgia,serif;">{meta_line}</p>
-</td>
-</tr>
-
-<tr>
-<td class="px-mobile" style="padding:14px 40px 28px 40px;">
-<h1 class="headline" style="margin:0;font-size:30px;line-height:1.2;font-weight:bold;color:#2c2417;font-family:Georgia,serif;">{title}</h1>
-</td>
-</tr>
-
-{cover}
-
-<tr>
-<td class="px-mobile" style="padding:0 40px 28px 40px;">
-<p style="margin:0;font-size:18px;line-height:1.75;color:#2c2417;font-family:Georgia,serif;">{hook_text}</p>
-</td>
-</tr>
-
-<tr>
-<td align="center" class="px-mobile" style="padding:0 40px 12px 40px;">
-<table border="0" cellpadding="0" cellspacing="0" role="presentation">
-<tr>
-<td align="center" bgcolor="#8b4513" style="border-radius:4px;">
-<a class="cta-button" href="{page_url}" style="display:inline-block;padding:18px 42px;font-family:Georgia,serif;font-size:18px;font-weight:bold;letter-spacing:1px;color:#fffdf7;background:#8b4513;text-decoration:none;border-radius:4px;text-transform:uppercase;" target="_blank">Listen Now &rarr;</a>
-</td>
-</tr>
-</table>
-</td>
-</tr>
-
-<tr>
-<td class="px-mobile" style="padding:28px 40px 36px 40px;">
-<p style="margin:0 0 6px 0;font-size:18px;line-height:1.75;color:#2c2417;font-family:Georgia,serif;">{signoff_line1}</p>
-<p style="margin:0;font-size:18px;line-height:1.75;color:#2c2417;font-family:Georgia,serif;">{signoff_line2}</p>
-</td>
-</tr>
-
-<tr>
-<td class="px-mobile" style="padding:0 40px;">
-<hr style="border:none;border-top:1px solid #e8dcc8;margin:0;"/>
-</td>
-</tr>
-
-<tr>
-<td class="px-mobile" style="padding:28px 40px 24px 40px;">
-<p style="margin:0 0 8px 0;font-size:14px;letter-spacing:1.5px;text-transform:uppercase;color:#8b7355;font-family:Georgia,serif;">Our audio library</p>
-<p style="margin:0;font-size:16px;line-height:1.75;color:#2c2417;font-family:Georgia,serif;">
-<a href="{hub_url}" style="color:#8b4513;text-decoration:none;font-weight:bold;">&rarr; {hub_name}</a>
-</p>
-</td>
-</tr>
-
-<tr>
-<td class="px-mobile" style="padding:4px 40px 36px 40px;">
-<p style="margin:0;font-size:16px;line-height:1.75;color:#5a4a3a;font-family:Georgia,serif;">
-<strong>Beezy Beez</strong> crafts <a href="{PRODUCT_URL}" style="color:#8b4513;text-decoration:none;">botanical extract honey</a> for people navigating sleep changes after 50. Our audio library is made for the same moments — when rest doesn't come easily.
-</p>
-</td>
-</tr>
-
-</table>
-<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:600px;max-width:600px;" width="600">
-<tr>
-<td align="center" class="px-mobile" style="padding:24px 40px 8px 40px;">
-<p style="margin:0;font-size:14px;line-height:1.6;color:#8b7355;font-family:Georgia,serif;">
-Beezy Beez Honey &middot; {FROM_EMAIL}<br/>
-<a href="{SHOPIFY_DOMAIN}" style="color:#8b7355;">{SHOPIFY_DOMAIN.replace("https://", "")}</a>
-</p>
-</td>
-</tr>
-<tr>
-<td align="center" style="padding:8px 40px 24px 40px;">
-<p style="margin:0;font-size:12px;line-height:1.6;color:#a89880;font-family:Georgia,serif;">{unsub}</p>
-</td>
-</tr>
-</table>
-</td>
-</tr>
-</table>
-</body>
-</html>"""
+    lines = [
+        "<!DOCTYPE html>",
+        '<html lang="en">',
+        "<head>",
+        '<meta charset="utf-8"/>',
+        '<meta content="width=device-width, initial-scale=1.0" name="viewport"/>',
+        '<meta content="IE=edge" http-equiv="X-UA-Compatible"/>',
+        "<title>" + h1 + "</title>",
+        "<style>" + _CSS + "</style></head>",
+        "<body>",
+        # Preview text
+        '<div style="display: none; max-height: 0; overflow: hidden; mso-hide: all; '
+        'font-size: 1px; color: #faf6ee; line-height: 1px;">' + preview_text + "</div>",
+        # Outer table
+        '<table border="0" cellpadding="0" cellspacing="0" role="presentation" '
+        'style="background: #faf6ee;" width="100%">',
+        "<tr><td align=\"center\">",
+        '<table border="0" cellpadding="0" cellspacing="0" class="container" '
+        'role="presentation" style="width: 600px; max-width: 100%;" width="600">',
+        # Logo
+        '<tr><td class="px" style="padding: 36px 40px 24px 40px; text-align: left;">'
+        '<img alt="Beezy Beez" src="' + _LOGO_URL + '" '
+        'style="display: block; height: auto;" width="120"/></td></tr>',
+        # Eyebrow
+        '<tr><td class="px" style="padding: 0 40px 8px 40px;">'
+        '<p class="eyebrow" style="margin: 0;">' + eyebrow + "</p></td></tr>",
+        # H1
+        '<tr><td class="px" style="padding: 0 40px 24px 40px;"><h1>' + h1 + "</h1></td></tr>",
+        # Body
+        '<tr><td class="px" style="padding: 0 40px 0 40px;">',
+        "<p>Hi {{ person.first_name|default:'there' }},</p>",
+        "<p>" + body_p1 + "</p>",
+        "<p>" + body_p2 + "</p>",
+        "<p>" + body_p3 + "</p>",
+        "</td></tr>",
+        # Hero image
+        hero_row,
+        # Episode card
+        '<tr><td class="px" style="padding: 0 40px 24px 40px;">',
+        '<table border="0" cellpadding="0" cellspacing="0" role="presentation" '
+        'style="background: #f3ead7; border: 1px solid #e8dfd0; border-radius: 4px;" width="100%">',
+        '<tr><td style="padding: 28px 24px 28px 24px; text-align: center;">',
+        '<p style="font-family: \'Cormorant Garamond\', Georgia, serif; font-size: 24px; '
+        'font-style: italic; color: #2a1f15; margin: 0 0 6px 0;">' + card_title + "</p>",
+        '<p style="font-family: Lato, Helvetica, Arial, sans-serif; font-size: 14px; '
+        'color: #6b5947; margin: 0 0 20px 0;">' + card_subtitle + "</p>",
+        '<a class="btn" href="' + page_url + '" style="display: inline-block; '
+        'background: #87401C; color: #ffffff; padding: 14px 32px; '
+        'font-family: Lato, Helvetica, Arial, sans-serif; font-size: 15px; '
+        'font-weight: 600; letter-spacing: 0.5px; border-radius: 2px; '
+        'text-decoration: none;">' + cta_label + "</a>",
+        "</td></tr>",
+        "</table>",
+        "</td></tr>",
+        # Sign-off
+        '<tr><td class="px" style="padding: 8px 40px 0 40px;">'
+        "<p>Sleep well.</p>"
+        '<p style="margin-bottom: 24px;">— Alan</p></td></tr>',
+        # Divider
+        '<tr><td class="px" style="padding: 0 40px;">'
+        '<div style="background: #e8dfd0; height: 1px; line-height: 1px; font-size: 1px;"> </div>'
+        "</td></tr>",
+        # Footer
+        '<tr><td class="px" style="padding: 24px 40px 40px 40px;">'
+        '<p style="font-family: Lato, Helvetica, Arial, sans-serif; font-size: 12px; '
+        "color: #6b5947; line-height: 1.5; margin: 0;\">" + footer_text + "<br/>"
+        "{% unsubscribe 'Unsubscribe' %}  ·  "
+        '<a href="https://trybeezybeez.com" style="color: #87401C; '
+        'text-decoration: underline;">trybeezybeez.com</a></p></td></tr>',
+        "</table>",
+        "</td></tr>",
+        "</table>",
+        "</body>",
+        "</html>",
+    ]
+    return "\n".join(lines)
 
 
 def build_episode_emails(metadata: dict, page_url: str) -> tuple[str, str]:
-    """
-    Build Email A (Engaged Customers) and Email B (Active Seal) HTML for a sleep audio episode.
+    """Build Email A (Engaged Customers) and Email B (Active Seal).
 
+    Structure matches Bridge of Incidents live campaigns exactly.
     Returns (email_a_html, email_b_html).
     """
-    title        = (metadata.get("title") or "New Episode").strip()
-    episode_type = metadata.get("episode_type") or "sleep_story"
-    duration     = metadata.get("duration_minutes")
-    cover_url    = (
-        metadata.get("cover_image_url")
-        or metadata.get("thumbnail_url")
-        or metadata.get("image_url")
-        or ""
+    title      = metadata.get("title", "")
+    ep_type    = metadata.get("episode_type", "sleep_story")
+    duration   = int(metadata.get("duration_minutes") or 25)
+    desc_short = (metadata.get("description_short") or "").strip()
+    cover_url  = (
+        metadata.get("cover_image_url") or metadata.get("hero_image_url") or ""
     ).strip()
-    url          = (page_url or metadata.get("shopify_page_url") or metadata.get("buzzsprout_url") or "#").strip()
 
-    label = _EPISODE_LABELS.get(episode_type, episode_type.replace("_", " ").title())
+    # Body p2 — episode description (same structure as the live templates)
+    ep_desc_a = (
+        "Tonight there's a new one: <em>" + title + "</em>. Roughly "
+        + str(duration) + " minutes. " + desc_short
+    )
+    if ep_type == "sleep_story":
+        ep_desc_b = (
+            "The new Sleep Better episode dropped tonight: <em>" + title + "</em>."
+            " Roughly " + str(duration) + " minutes, slow narration, the kind of story"
+            " that takes you somewhere quiet and leaves you there."
+        )
+    else:
+        ep_desc_b = (
+            "The new episode is live: <em>" + title + "</em>. " + desc_short
+        )
 
-    hook_a = _HOOK_A.get(episode_type, _HOOK_A["sleep_story"])
-    hook_b = _HOOK_B.get(episode_type, _HOOK_B["sleep_story"])
+    subtitle_a = _SUBTITLE_A.get(
+        ep_type, "Sleep Better Podcast · ~{dur} min"
+    ).format(dur=duration)
+    subtitle_b = _SUBTITLE_B.get(
+        ep_type, "Sleep Better Podcast · ~{dur} min"
+    ).format(dur=duration)
 
-    dur_str = f" ({duration} min)" if duration else ""
-
-    email_a = _build_html(
-        title=title,
-        episode_type=episode_type,
-        duration_minutes=duration,
-        cover_url=cover_url,
-        page_url=url,
-        hook_text=hook_a,
-        signoff_line1="Sweet dreams,",
-        signoff_line2="&mdash; <em>Beezy Beez</em>",
-        preheader=f"New {label.lower()}: {title}{dur_str} — tap to listen.",
+    email_a = _render(
+        preview_text=title + " — a slow walk into sleep. We're sharing this one.",
+        eyebrow="A note from Alan",
+        h1=_H1_A.get(ep_type, "tonight, a sleep story"),
+        body_p1=_INTRO_A.get(ep_type, _INTRO_A["sleep_story"]),
+        body_p2=ep_desc_a,
+        body_p3=_CTA_A.get(ep_type, _CTA_A["sleep_story"]),
+        hero_url=cover_url,
+        hero_alt=title,
+        page_url=page_url,
+        card_title=title,
+        card_subtitle=subtitle_a,
+        cta_label=_CTA_LABEL_A.get(ep_type, "Play tonight's story"),
+        footer_text=(
+            "You're receiving this because you're part of the Beezy Beez community."
+        ),
     )
 
-    email_b = _build_html(
-        title=title,
-        episode_type=episode_type,
-        duration_minutes=duration,
-        cover_url=cover_url,
-        page_url=url,
-        hook_text=hook_b,
-        signoff_line1="For Hive Club members,",
-        signoff_line2="&mdash; <em>Beezy Beez</em>",
-        preheader=f"Members first — {title}{dur_str} is live in your library.",
+    email_b = _render(
+        preview_text=title + " — your new story tonight. Tap to start drifting.",
+        eyebrow="A note from Alan · Active Seal members",
+        h1=_H1_B.get(ep_type, "tonight's story is up"),
+        body_p1=ep_desc_b,
+        body_p2=_MEMBER_B.get(ep_type, _MEMBER_B["sleep_story"]),
+        body_p3=_CTA_B.get(ep_type, _CTA_B["sleep_story"]),
+        hero_url=cover_url,
+        hero_alt="Active Seal member listening to tonight's " + ep_type.replace("_", " "),
+        page_url=page_url,
+        card_title=title,
+        card_subtitle=subtitle_b,
+        cta_label=_CTA_LABEL_B.get(ep_type, "Play tonight's story"),
+        footer_text="You're receiving this as an Active Seal member.",
     )
 
     return email_a, email_b
