@@ -235,6 +235,7 @@ def _build_page_html(meta: dict[str, Any], page_url: str = "") -> str:
     desc_long    = (meta.get("description_long") or desc_short).strip()
     embed_raw    = meta.get("buzzsprout_embed_url") or meta.get("buzzsprout_url") or ""
     script_text  = (meta.get("script_text") or "").strip()
+    cover_image  = (meta.get("hero_image_url") or meta.get("cover_image_url") or "").strip()
 
     label         = _EPISODE_LABELS.get(episode_type, episode_type.replace("_", " ").title())
     dur_str       = f" · {duration} min" if duration else ""
@@ -332,7 +333,13 @@ def _build_page_html(meta: dict[str, Any], page_url: str = "") -> str:
         f'<p class="epis-eyebrow">{eyebrow}</p>'
         f'<h1 class="epis-h1">{title}</h1>'
         f'<p class="epis-dek">{desc_short}</p>'
-        f'</div>',
+        + (
+            f'<img src="{cover_image}" alt="{title}" '
+            f'style="width:100%;max-width:700px;height:auto;border-radius:8px;'
+            f'margin:20px auto 0;display:block;">'
+            if cover_image else ""
+        )
+        + f'</div>',
         # Audio player
         f'<section class="epis-audio"><p class="epis-audio-label">Listen</p>'
         + (

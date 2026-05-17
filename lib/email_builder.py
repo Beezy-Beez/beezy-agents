@@ -111,7 +111,7 @@ def build_email_html(issue: dict, shopify_domain: str = SHOPIFY_DOMAIN) -> str:
         preview_text      — hidden preheader (falls back to subject_line)
         cover_image_url   — full-width cover image
         long_form_body    — for accurate read-time (falls back to email_teaser_body)
-        page_dek          — unused; H1 comes from first para of email_teaser_body
+        page_dek          — shown as italic subtitle under the H1
     """
     issue_num   = int(issue.get("number") or 0)
     subject     = (issue.get("subject_line") or "").strip()
@@ -120,11 +120,14 @@ def build_email_html(issue: dict, shopify_domain: str = SHOPIFY_DOMAIN) -> str:
     preview_txt = (issue.get("preview_text") or subject).strip()
     cover_url   = (issue.get("cover_image_url") or "").strip()
     full_body   = (issue.get("long_form_body") or body_md).strip()
+    page_dek    = (issue.get("page_dek") or "").strip()
 
-    h1_hook, rest    = _split_hook_and_body(body_md)
-    teaser_read_mins = _read_time_minutes(rest)
+    # H1 = subject_line (the hook that made them open the email).
+    # Include ALL of email_teaser_body as body — no paragraph stripped as title.
+    h1_hook          = _inline_format(subject)
     full_read_mins   = _read_time_minutes(full_body)
-    body_html        = _build_body_html(rest)
+    teaser_read_mins = _read_time_minutes(body_md)
+    body_html        = _build_body_html(body_md)
     issue_label      = f"The Hive Mind · Issue {issue_num:03d}"
 
     cta_url = (
@@ -182,6 +185,7 @@ a {{color:#8b4513;text-decoration:underline}}
 <h1 class="headline" style="margin:0; font-size:34px; line-height:1.18; font-weight:bold; color:#2c2417; font-family:Georgia, serif;">{h1_hook}</h1>
 </td>
 </tr>
+{f'<tr><td class="px-mobile" style="padding: 10px 40px 0 40px;"><p style="margin:0; font-size:19px; line-height:1.5; color:#5a4a3a; font-family:Georgia, serif; font-style:italic;">' + _inline_format(page_dek) + '</p></td></tr>' if page_dek else ''}
 <tr>
 <td class="px-mobile" style="padding: 12px 40px 28px 40px;">
 <p style="margin:0; font-size:16px; color:#8b7355; font-family:Georgia, serif; font-style:italic;">&#127769; A {teaser_read_mins}-minute read &mdash; written for tonight.</p>
