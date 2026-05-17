@@ -277,12 +277,11 @@ OFFER RULES BY AUDIENCE:
 - engaged_customers: product features, sleep stories, seasonal content.
 
 IMAGE PROMPT RULES:
-- 15-word Higgsfield prompt. MUST include a real human woman aged 50+.
-- Warm amber/golden/honey tones (#8b4513 palette). Photorealistic, editorial lifestyle.
-- Women depicted: diverse ethnicities, age-appropriate, never stock-photo generic.
-- NEVER: "woman reading a book", sad/lonely scenes, no-people scenes, cold blue tones.
-- VARY the scene each campaign: bedroom, kitchen, garden, patio, yoga, walking in nature, tea time.
-- Include honey jar in roughly 40% of images.
+- 15-word Higgsfield prompt. Woman: Caucasian, early 50s. Photorealistic, editorial lifestyle.
+- Setting: bedroom, garden, patio, yoga, walking in nature, tea time — NOT a kitchen.
+- Lighting: soft, natural — NOT warm yellow or amber artificial light.
+- Honey jar may appear on a nightstand or surface in the background — she is NOT holding it.
+- NEVER: sad/lonely scenes, no-people scenes, cold blue tones, product photography.
 
 Output ONLY valid JSON:
 {
@@ -382,13 +381,21 @@ def _generate_ab_subject(slot: dict, primary_subject: str) -> str:
 
 # ── Step 4: Generate image ─────────────────────────────────────────────────────
 
-def _generate_image(prompt: str) -> str:
+_CAMPAIGN_NEGATIVE_PROMPT = (
+    "kitchen, cooking, food, honey jar held in hand, yellow sweater, "
+    "warm artificial light, fluorescent light, orange dominant, amber dominant, "
+    "indoor cooking, product photography, stock photo, yellow lighting, orange background, "
+    "Black woman, dark skin, South Asian, East Asian"
+)
+
+
+def _generate_image(prompt: str, negative_prompt: str = "") -> str:
     if is_dry_run():
         print(f"[beezy_campaign/DRY RUN] would generate image: {prompt[:60]}")
         return "https://trybeezybeez.com/dry-run-placeholder.png"
     try:
         from workers.image_gen import generate_cover
-        return generate_cover(prompt).url
+        return generate_cover(prompt, negative_prompt=negative_prompt or None).url
     except Exception:
         pass
     api_key = os.environ.get("HIGGSFIELD_API_KEY", "")
@@ -396,8 +403,10 @@ def _generate_image(prompt: str) -> str:
     model   = os.environ.get("HIGGSFIELD_IMAGE_MODEL", "higgsfield-ai/soul/standard")
     base    = "https://platform.higgsfield.ai"
     hdrs    = {"Authorization": "Key " + api_key + ":" + secret, "Content-Type": "application/json"}
-    resp    = httpx.post(base + "/" + model, headers=hdrs, timeout=30,
-                         json={"prompt": prompt, "aspect_ratio": "16:9", "resolution": "720p"})
+    body    = {"prompt": prompt, "aspect_ratio": "16:9", "resolution": "720p"}
+    if negative_prompt:
+        body["negative_prompt"] = negative_prompt
+    resp    = httpx.post(base + "/" + model, headers=hdrs, timeout=30, json=body)
     resp.raise_for_status()
     req_id  = resp.json()["request_id"]
     for _ in range(60):
@@ -811,9 +820,11 @@ def run(slot: dict) -> dict:
     )
 
     # Image
-    prompt  = copy.get("image_prompt", "Woman 50 warm honey tones editorial lifestyle real human face")
+    prompt  = copy.get("image_prompt", "Caucasian woman early 50s bedroom soft natural light editorial lifestyle")
     print("[beezy_campaign] Generating image...")
-    raw_url = _generate_image(prompt)
+    print(f"[beezy_campaign] Image prompt: {prompt!r}")
+    print(f"[beezy_campaign] Negative prompt: {_CAMPAIGN_NEGATIVE_PROMPT!r}")
+    raw_url = _generate_image(prompt, negative_prompt=_CAMPAIGN_NEGATIVE_PROMPT)
     cdn_url = _upload_to_shopify_cdn(raw_url, "Beezy Beez email")
     print("[beezy_campaign]   Image: " + cdn_url)
 
