@@ -203,7 +203,7 @@ def test_hive_mind():
     record(
         "HIVE MIND (Issue 20)", verdict,
         f"YES (isPublished={page_published})" if page_exists else "NOT FOUND",
-        "sleep-science-hub + the-hive-mind",
+        "the-hive-mind only",
         f"YES {campaign_id[:12] if campaign_id else 'N/A'}... status={camp_status}",
         "YES" if smart_off else "NO",
     )
