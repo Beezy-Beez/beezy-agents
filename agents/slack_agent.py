@@ -742,6 +742,55 @@ def _process_beezy_agents(conn) -> None:
 
 
 
+def _post_episode_complete_summary(metadata: dict, result: str) -> None:
+    """Post a rich completion summary to #beezy-agents when an episode is deployed."""
+    title    = metadata.get("title", "?")
+    ep_type  = metadata.get("episode_type", "sleep_story").replace("_", " ").title()
+    page_url = metadata.get("shopify_page_url") or metadata.get("buzzsprout_url", "?")
+    # Parse campaign URLs out of result string ("Email A: <url>\nEmail B: <url>")
+    lines    = result.splitlines()
+    camp_a   = next((l.split("Email A: ", 1)[1].strip() for l in lines if "Email A:" in l), "")
+    camp_b   = next((l.split("Email B: ", 1)[1].strip() for l in lines if "Email B:" in l), "")
+    summary  = [
+        f"*Title:* {title}",
+        f"*Type:* {ep_type}",
+        f"*Page:* {page_url}",
+    ]
+    if camp_a:
+        summary.append(f"*Email A (Engaged Customers):* {camp_a}")
+    if camp_b:
+        summary.append(f"*Email B (Active Seal):* {camp_b}")
+    summary.append("Both campaigns are DRAFT — schedule Email A for 8pm ET, Email B for 8:15pm ET.")
+    _post_message(
+        BEEZY_AGENTS_CHANNEL,
+        "✅ *Episode deployed: " + title + "*\n" +
+        "\n".join("• " + l for l in summary),
+    )
+
+
+def _clear_pending_tts_run(conn, episode_id: str) -> None:
+    """Remove a completed episode from the 30-min TTS watchdog list."""
+    if not episode_id:
+        return
+    try:
+        row = conn.execute(
+            "SELECT value FROM agent_state WHERE key='pending_tts_runs'"
+        ).fetchone()
+        if not row:
+            return
+        runs = json.loads(row[0])
+        updated = [r for r in runs if r.get("episode_id") != episode_id]
+        if len(updated) != len(runs):
+            conn.execute(
+                "INSERT INTO agent_state (key, value, updated_at) VALUES ('pending_tts_runs', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                (json.dumps(updated),),
+            )
+            conn.commit()
+    except Exception as exc:
+        print(f"[slack_agent] Failed to clear pending TTS run (non-fatal): {exc}")
+
+
 def _process_new_episodes(conn) -> None:
     """Check #beezy-new-episodes for unprocessed episode metadata."""
     last_ts  = _get_last_read_ts(conn, "new_episodes")
@@ -757,16 +806,20 @@ def _process_new_episodes(conn) -> None:
                 s, e = text.find("{"), text.rfind("}")
                 if s != -1:
                     metadata = json.loads(text[s:e+1])
-                    print(f"[slack_agent] Episode ready: {metadata.get('title')}")
+                    title = metadata.get("title", "?")
+                    print(f"[slack_agent] Episode ready: {title}")
                     from agents.klaviyo_deployer import deploy_episode
                     result = deploy_episode(metadata, conn)
-                    _post_message(
-                        NEW_EPISODES_CHANNEL,
-                        "Deployed: " + metadata.get("title", "?") + " — " + result
-                    )
+                    # Plain ack in #beezy-new-episodes
+                    _post_message(NEW_EPISODES_CHANNEL, f"Deployed: {title} — {result}")
+                    # Rich summary in #beezy-agents (Boris's command channel)
+                    _post_episode_complete_summary(metadata, result)
+                    # Clear from 30-min watchdog
+                    _clear_pending_tts_run(conn, metadata.get("episode_id", ""))
             except Exception as ex:
                 print(f"[slack_agent] Episode deploy error: {ex}")
                 _post_message(NEW_EPISODES_CHANNEL, "Deploy failed: " + str(ex))
+                _post_message(BEEZY_AGENTS_CHANNEL, f"❌ Episode deploy failed: {ex}")
 
         _save_last_read_ts(conn, "new_episodes", ts)
 

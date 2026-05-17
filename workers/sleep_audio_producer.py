@@ -14,10 +14,11 @@ Full automatic pipeline:
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 
 import httpx
 
@@ -195,7 +196,7 @@ def run_sleep_audio_slot(slot: dict) -> str:
     # ── 6. Dispatch TTS ───────────────────────────────────────────────────────
     label = _EPISODE_LABELS.get(episode_type, "Sleep Audio")
     if _SAP_URL:
-        dispatched = _dispatch_to_tts(
+        dispatched, tts_run_id = _dispatch_to_tts(
             episode_id=episode_id, title=title, script=script,
             episode_type=episode_type, duration=duration,
             profile="sleep_story_philosophical",
@@ -203,13 +204,16 @@ def run_sleep_audio_slot(slot: dict) -> str:
             description_short=description_short,
         )
         if dispatched:
+            _store_pending_tts_run(episode_id=episode_id, run_id=tts_run_id, title=title)
             _post_slack_auto_dispatch(
                 title=title, label=label, duration=duration,
                 slot_date=slot_date, page_url=page_url,
                 deploy_result=deploy_result, cover_url=cdn_url,
+                run_id=tts_run_id,
             )
             return f"deployed:{episode_id}"
-        # SAP call failed → fall through to manual handoff
+        # SAP returned non-202 — post error and fall through to manual handoff
+        _post_slack_error(title=title, label=label, run_id=tts_run_id, episode_id=episode_id)
 
     _post_slack_handoff(
         title=title, label=label, duration=duration, slot_date=slot_date,
@@ -224,9 +228,9 @@ def _dispatch_to_tts(
     *, episode_id: str, title: str, script: str, episode_type: str,
     duration: int, profile: str, slot_date: str, page_url: str,
     description_short: str,
-) -> bool:
+) -> tuple[bool, str]:
     """POST script to the sleep-audio-platform cloud API.
-    Returns True if the server accepted (202), False on any failure.
+    Returns (accepted, run_id). run_id is '' on failure.
     """
     payload = {
         "episode_id":          episode_id,
@@ -252,34 +256,159 @@ def _dispatch_to_tts(
             verify=False,   # Replit CA bundle doesn't include all intermediate certs
         )
         if resp.status_code == 202:
-            print(f"[sleep_audio] TTS dispatched to sleep-audio-platform — run_id: {resp.json().get('run_id', '?')}")
-            return True
+            run_id = resp.json().get("run_id", "")
+            print(f"[sleep_audio] TTS dispatched to sleep-audio-platform — run_id: {run_id}")
+            return True, run_id
         print(f"[sleep_audio] sleep-audio-platform returned {resp.status_code}: {resp.text[:200]}")
-        return False
+        return False, ""
     except Exception as exc:
         print(f"[sleep_audio] TTS dispatch failed (falling back to Slack handoff): {exc}")
-        return False
+        return False, ""
+
+
+def _store_pending_tts_run(*, episode_id: str, run_id: str, title: str) -> None:
+    """Append a pending TTS run to agent_state for the 30-min watchdog."""
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM agent_state WHERE key='pending_tts_runs'"
+            ).fetchone()
+            runs = json.loads(row[0]) if row else []
+            runs.append({
+                "episode_id":    episode_id,
+                "run_id":        run_id,
+                "title":         title,
+                "dispatched_at": datetime.now(timezone.utc).isoformat(),
+            })
+            conn.execute(
+                "INSERT INTO agent_state (key, value, updated_at) VALUES ('pending_tts_runs', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                (json.dumps(runs),),
+            )
+            conn.commit()
+    except Exception as exc:
+        print(f"[sleep_audio] Failed to store pending TTS run (non-fatal): {exc}")
+
+
+def check_tts_timeouts() -> None:
+    """Called every 5 min by cron. Alerts #beezy-agents if a TTS run has been
+    pending > 30 minutes without a Buzzsprout URL appearing in the episodes table.
+    """
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM agent_state WHERE key='pending_tts_runs'"
+            ).fetchone()
+        if not row:
+            return
+        runs: list[dict] = json.loads(row[0])
+    except Exception:
+        return
+
+    if not runs:
+        return
+
+    now = datetime.now(timezone.utc)
+    still_pending: list[dict] = []
+
+    for run in runs:
+        try:
+            dispatched_at = datetime.fromisoformat(run["dispatched_at"])
+        except (KeyError, ValueError):
+            continue
+        age_minutes = (now - dispatched_at).total_seconds() / 60
+
+        if age_minutes < 30:
+            still_pending.append(run)
+            continue
+
+        # Check whether the episode has a Buzzsprout URL yet
+        try:
+            from db.connection import get_conn
+            with get_conn() as conn:
+                ep = conn.execute(
+                    "SELECT buzzsprout_url FROM episodes WHERE episode_id = %s",
+                    (run["episode_id"],),
+                ).fetchone()
+        except Exception:
+            still_pending.append(run)
+            continue
+
+        if ep and ep[0]:
+            # Completed — drop from watchlist
+            print(f"[sleep_audio] TTS run {run['run_id'][:8]}… completed (Buzzsprout URL in DB)")
+            continue
+
+        # Still no audio after 30 min — alert Boris
+        run_id  = run.get("run_id", "unknown")
+        title   = run.get("title", "unknown")
+        print(f"[sleep_audio] TTS timeout alert — run_id: {run_id}")
+        post_draft(
+            title=f"⚠️ TTS timeout — {title}",
+            summary_lines=[
+                f"*Episode:* {title}",
+                f"*Run ID:* `{run_id}`",
+                f"*Dispatched:* {run['dispatched_at'][:19].replace('T', ' ')} UTC",
+                f"*Age:* {int(age_minutes)} min — no Buzzsprout URL yet",
+                "Check sleep-audio-platform logs for this run_id.",
+            ],
+            body="",
+        )
+        # Drop from list — alert sent once, don't spam
+        # (if genuinely stuck Boris can redeploy manually)
+
+    # Persist updated watchlist
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO agent_state (key, value, updated_at) VALUES ('pending_tts_runs', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                (json.dumps(still_pending),),
+            )
+            conn.commit()
+    except Exception as exc:
+        print(f"[sleep_audio] Failed to update pending_tts_runs: {exc}")
 
 
 def _post_slack_auto_dispatch(
     *, title: str, label: str, duration: int, slot_date: str,
-    page_url: str, deploy_result: str, cover_url: str,
+    page_url: str, deploy_result: str, cover_url: str, run_id: str,
 ) -> None:
-    """Minimal Slack notification used when the webhook handles TTS automatically."""
+    """Slack notification when TTS is accepted by sleep-audio-platform."""
+    eta_min = max(5, duration // 2)
     summary_lines = [
         f"*Title:* {title}",
         f"*Type:* {label}  ·  {duration} min",
         f"*Send date:* {slot_date}",
         f"*Page:* {page_url}",
-        f"*TTS:* Dispatched to sleep-audio-platform ⚡",
-        f"*Campaigns:* Created automatically once Buzzsprout upload completes",
+        f"*TTS run ID:* `{run_id}`",
+        f"*ETA:* ~{eta_min}–{eta_min * 3} min — campaigns auto-created on Buzzsprout upload",
     ]
     post_draft(
-        title=f"Sleep Audio Dispatched — {title}",
+        title=f"🎙 Sleep Audio Dispatched — {title}",
         summary_lines=summary_lines,
-        body="TTS pipeline is running in the cloud. No action needed.",
+        body="TTS pipeline running in the cloud. No action needed — campaigns post here when audio is ready.",
         image_url=cover_url or None,
         image_alt=title,
+    )
+
+
+def _post_slack_error(*, title: str, label: str, run_id: str, episode_id: str) -> None:
+    """Slack alert when sleep-audio-platform returns non-202 or is unreachable."""
+    post_draft(
+        title=f"❌ TTS dispatch failed — {title}",
+        summary_lines=[
+            f"*Episode:* {title}",
+            f"*Type:* {label}",
+            f"*Episode ID:* `{episode_id}`",
+            f"*Run ID:* `{run_id or 'n/a'}`",
+            "sleep-audio-platform returned a non-202 response or is unreachable.",
+            "Script has been posted below for manual TTS — see handoff message.",
+        ],
+        body="",
     )
 
 

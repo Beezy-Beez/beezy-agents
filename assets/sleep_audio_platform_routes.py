@@ -29,8 +29,10 @@ import json
 import os
 import re
 import tempfile
+import time
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import httpx
 import structlog
@@ -45,6 +47,10 @@ from src.profiles.voice_selector import select_voice
 log = structlog.get_logger()
 
 router = APIRouter(prefix="/api/v1", tags=["Generation"])
+
+# In-memory run state — survives for the lifetime of the process.
+# Keys: run_id (str). Values: dict with status, episode_id, title, timestamps.
+_run_states: dict[str, dict] = {}
 
 _API_KEY          = os.environ.get("GENERATE_API_KEY", "")
 _BUZZSPROUT_POD   = os.environ.get("BUZZSPROUT_PODCAST_ID", "")
@@ -75,7 +81,17 @@ class GenerateResponse(BaseModel):
     run_id: str
 
 
-# ── Endpoint ──────────────────────────────────────────────────────────────────
+class StatusResponse(BaseModel):
+    run_id: str
+    status: str                   # accepted | tts_running | buzzsprout_uploading | slack_posting | completed | failed
+    episode_id: Optional[str] = None
+    title: Optional[str] = None
+    accepted_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    error: Optional[str] = None
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/generate", response_model=GenerateResponse, status_code=202)
 async def generate(
@@ -87,16 +103,43 @@ async def generate(
         raise HTTPException(status_code=403, detail="Invalid API key")
 
     run_id = str(uuid.uuid4())
+    _run_states[run_id] = {
+        "run_id":      run_id,
+        "status":      "accepted",
+        "episode_id":  request.episode_id,
+        "title":       request.title,
+        "accepted_at": time.time(),
+        "completed_at": None,
+        "error":       None,
+    }
     log.info("generate_accepted", episode_id=request.episode_id, title=request.title, run_id=run_id)
     background_tasks.add_task(_run_pipeline, request, run_id)
     return GenerateResponse(status="accepted", run_id=run_id)
 
 
+@router.get("/status/{run_id}", response_model=StatusResponse)
+async def status(
+    run_id: str,
+    x_api_key: str = Header(default=""),
+) -> StatusResponse:
+    if _API_KEY and x_api_key != _API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+    state = _run_states.get(run_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"run_id {run_id!r} not found — may have been lost on restart")
+    return StatusResponse(**state)
+
+
 # ── Pipeline (background task) ────────────────────────────────────────────────
 
 async def _run_pipeline(request: GenerateRequest, run_id: str) -> None:
+    def _set_status(status: str) -> None:
+        if run_id in _run_states:
+            _run_states[run_id]["status"] = status
+
     log.info("pipeline_start", episode_id=request.episode_id, run_id=run_id)
     try:
+        _set_status("tts_running")
         profile = load_profile(request.profile)
 
         # Voice selection
@@ -152,6 +195,7 @@ async def _run_pipeline(request: GenerateRequest, run_id: str) -> None:
                     log.warning("outro_tts_failed", error=str(exc))
 
             # Upload body audio to Buzzsprout (must happen before tmpdir is deleted)
+            _set_status("buzzsprout_uploading")
             buzzsprout_url = await _upload_to_buzzsprout(
                 audio_path=result.audio_path,
                 title=request.title,
@@ -160,6 +204,7 @@ async def _run_pipeline(request: GenerateRequest, run_id: str) -> None:
             log.info("buzzsprout_uploaded", url=buzzsprout_url)
 
         # tmpdir cleaned up — post metadata to Slack
+        _set_status("slack_posting")
         episode_meta = {
             "episode_id":          request.episode_id,
             "title":               request.title,
@@ -170,10 +215,16 @@ async def _run_pipeline(request: GenerateRequest, run_id: str) -> None:
             "duration_minutes":    int(result.total_duration_seconds / 60),
         }
         await _post_to_new_episodes(episode_meta)
+
+        _run_states[run_id]["status"]       = "completed"
+        _run_states[run_id]["completed_at"] = time.time()
         log.info("pipeline_complete", episode_id=request.episode_id, run_id=run_id)
 
-    except Exception:
+    except Exception as exc:
         log.exception("pipeline_failed", episode_id=request.episode_id, run_id=run_id)
+        if run_id in _run_states:
+            _run_states[run_id]["status"] = "failed"
+            _run_states[run_id]["error"]  = str(exc)
 
 
 # ── Buzzsprout upload ─────────────────────────────────────────────────────────
