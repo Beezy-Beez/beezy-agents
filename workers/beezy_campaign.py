@@ -276,21 +276,13 @@ OFFER RULES BY AUDIENCE:
 - one_time_buyers: $25 credit, BOGO, product features.
 - engaged_customers: product features, sleep stories, seasonal content.
 
-IMAGE PROMPT RULES:
-- 15-word Higgsfield prompt. Woman: Caucasian, early 50s. Photorealistic, editorial lifestyle.
-- Setting: bedroom, garden, patio, yoga, walking in nature, tea time — NOT a kitchen.
-- Lighting: soft, natural — NOT warm yellow or amber artificial light.
-- Honey jar may appear on a nightstand or surface in the background — she is NOT holding it.
-- NEVER: sad/lonely scenes, no-people scenes, cold blue tones, product photography.
-
 Output ONLY valid JSON:
 {
   "subject": "...",
   "preview_text": "under 90 chars",
   "from_label": "Alan from Beezy Beez",
   "body_paragraphs": ["para 1", "para 2", "para 3"],
-  "cta_text": "SHOP NOW",
-  "image_prompt": "15-word prompt with white woman 50+"
+  "cta_text": "SHOP NOW"
 }"""
 
 
@@ -380,6 +372,78 @@ def _generate_ab_subject(slot: dict, primary_subject: str) -> str:
 
 
 # ── Step 4: Generate image ─────────────────────────────────────────────────────
+
+_LAPSED_AUDIENCES = {
+    "lapsed_30d", "lapsed_60d", "lapsed_60_90d", "lapsed_90d",
+    "lapsed_90_180d", "lapsed_180d", "lapsed_180d_plus", "winback_180d",
+}
+_HIGH_VALUE_AUDIENCES = {
+    "vip", "inner_circle", "whales", "high_aov",
+    "active_seal", "active_subscribers",
+}
+
+
+def _build_image_prompt(slot: dict, copy: dict) -> str:
+    """Return a Higgsfield prompt (≤15 words) built from slot + generated copy.
+
+    Maps content_type + audience + topic_angle + subject line to an emotional scene.
+    Demographics: Caucasian, age 60+, women primarily.
+    Every call produces a unique, context-driven result — no fixed templates.
+    """
+    content_type = slot.get("content_type", "")
+    audience     = (slot.get("audience") or "").lower().replace(" ", "_")
+    topic        = (slot.get("topic_angle") or "").lower()
+    subject      = (copy.get("subject") or "").lower()
+    text         = topic + " " + subject  # combined signal for keyword matching
+
+    is_reactivation = audience in _LAPSED_AUDIENCES or content_type == "reactivation"
+    is_high_value   = audience in _HIGH_VALUE_AUDIENCES
+    is_sniper       = content_type == "sniper_followup"
+
+    sleep   = any(w in text for w in ["sleep", "wak", "rest", "tired", "insomnia", "3am", "night"])
+    morning = any(w in text for w in ["morning", "dawn", "sunrise", "routine", "ritual"])
+    science = any(w in text for w in ["science", "research", "why", "how", "study"])
+    relief  = any(w in text for w in ["finally", "solution", "discover", "works", "back", "return"])
+    nature  = any(w in text for w in ["garden", "walk", "outdoor", "nature", "fresh", "patio"])
+    product = any(w in text for w in ["honey", "cbn", "cinnamon", "caramel", "gummy", "oil", "balm"])
+
+    # Sniper / flow test — checked first so audience type doesn't override the angle
+    if is_sniper:
+        if sleep:
+            return "Caucasian woman 60s predawn bedroom window silver light restful peaceful serene"
+        if morning:
+            return "Caucasian woman 60s morning window bedroom light hands cup peaceful warm calm"
+        return "Caucasian woman 60s quiet sunlit room soft daylight thoughtful calm editorial"
+
+    # Reactivation: been struggling, quietly considering coming back
+    if is_reactivation:
+        if sleep:
+            return "Caucasian woman 60s sitting bedside predawn pale light hands folded quiet hopeful"
+        return "Caucasian woman 60s morning armchair window pale light hands around mug contemplative"
+
+    # High-value + sleep or product ritual: peaceful bedroom, honey on nightstand
+    if is_high_value and (sleep or product or morning):
+        return "Caucasian woman 60s bedroom morning honey jar nightstand sunlit ritual calm serene"
+
+    # VIP / inner_circle relief angle: finally found the solution, rested
+    if audience in ("inner_circle", "vip") and relief:
+        return "Caucasian woman 60s waking peacefully bedroom gentle morning light rested soft smile"
+
+    # Sleep science / educational
+    if science and sleep:
+        return "Caucasian woman 60s sunlit bedroom reading thoughtful morning light books calm editorial"
+
+    # Morning ritual / product feature
+    if morning or (product and not sleep):
+        return "Caucasian woman 60s bright morning bedroom window ritual calm editorial lifestyle"
+
+    # Nature / outdoor angle
+    if nature:
+        return "Caucasian woman 60s garden morning soft light path calm serene editorial"
+
+    # Default: peaceful lifestyle bedroom
+    return "Caucasian woman 60s peaceful bedroom morning soft natural light serene editorial"
+
 
 _CAMPAIGN_NEGATIVE_PROMPT = (
     "kitchen, cooking, food, honey jar held in hand, yellow sweater, "
@@ -820,7 +884,7 @@ def run(slot: dict) -> dict:
     )
 
     # Image
-    prompt  = copy.get("image_prompt", "Caucasian woman early 50s bedroom soft natural light editorial lifestyle")
+    prompt = _build_image_prompt(slot, copy)
     print("[beezy_campaign] Generating image...")
     print(f"[beezy_campaign] Image prompt: {prompt!r}")
     print(f"[beezy_campaign] Negative prompt: {_CAMPAIGN_NEGATIVE_PROMPT!r}")
