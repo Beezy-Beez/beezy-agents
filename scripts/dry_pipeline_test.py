@@ -210,57 +210,54 @@ def test_hive_mind():
 
 
 # =========================================================================
-# TEST 1b -- TTS pipeline (now local in beezy-agents, not external SAP)
+# TEST 1b -- SLEEP AUDIO PRODUCER → TTS dispatch to sleep-audio-platform
 # =========================================================================
 
 def test_tts_dispatch():
     print("\n" + "=" * 70)
-    print("TEST 1b: TTS PIPELINE -- local beezy-agents worker")
+    print("TEST 1b: SLEEP AUDIO PRODUCER -- TTS dispatch to sleep-audio-platform")
     print("=" * 70)
 
     import os as _os
+    sap_url = _os.environ.get("SLEEP_AUDIO_API_URL", "").rstrip("/")
+    sap_key = _os.environ.get("SLEEP_AUDIO_API_KEY", "")
 
-    # Check that the required secrets are configured
-    has_eleven  = bool(_os.environ.get("ELEVENLABS_API_KEY", ""))
-    has_bz_pod  = bool(_os.environ.get("BUZZSPROUT_PODCAST_ID", ""))
-    has_bz_tok  = bool(_os.environ.get("BUZZSPROUT_API_TOKEN", ""))
+    if not sap_url:
+        print("[test1b] SLEEP_AUDIO_API_URL not set -- skipping TTS dispatch test")
+        record("TTS DISPATCH (sleep-audio-platform)", BLOCK,
+               "N/A", "N/A", "N/A (SLEEP_AUDIO_API_URL not set)", "N/A",
+               error="SLEEP_AUDIO_API_URL missing -- dispatch would fall back to Slack handoff")
+        return
 
-    missing = []
-    if not has_eleven:
-        missing.append("ELEVENLABS_API_KEY")
-    if not has_bz_pod:
-        missing.append("BUZZSPROUT_PODCAST_ID")
-    if not has_bz_tok:
-        missing.append("BUZZSPROUT_API_TOKEN")
-
-    print(f"[test1b] ELEVENLABS_API_KEY:    {'✓ set' if has_eleven else '✗ MISSING'}")
-    print(f"[test1b] BUZZSPROUT_PODCAST_ID: {'✓ set' if has_bz_pod else '✗ MISSING'}")
-    print(f"[test1b] BUZZSPROUT_API_TOKEN:  {'✓ set' if has_bz_tok else '✗ MISSING'}")
+    print(f"[test1b] Target: {sap_url}/api/v1/generate")
+    print(f"[test1b] Auth:   {'X-API-Key set' if sap_key else 'no API key'}")
 
     try:
-        from workers.tts_pipeline import _chunk_script
-        # Verify chunker works correctly on a realistic script excerpt
-        sample = "This is the first paragraph.\n\nThis is the second paragraph.\n\nThis is the third paragraph."
-        chunks = _chunk_script(sample)
-        assert len(chunks) >= 1, "Chunker returned empty list"
-        assert all(len(c) <= 4_500 for c in chunks), "Chunk exceeds max length"
-        print(f"[test1b] _chunk_script: OK — {len(chunks)} chunk(s) from sample text")
+        from workers.sleep_audio_producer import _dispatch_to_tts
+        ok = _dispatch_to_tts(
+            episode_id="dry_test_dispatch_001",
+            title="Dry Test — TTS Dispatch Check",
+            script="This is a short dry-run script used to verify the dispatch endpoint. No real audio should be generated.",
+            episode_type="sleep_story",
+            duration=1,
+            profile="sleep_story_philosophical",
+            slot_date="2026-06-10",
+            page_url="https://trybeezybeez.com/pages/dry-test-dispatch",
+            description_short="Dry test only.",
+        )
+        if ok:
+            print("[test1b] PASS — sleep-audio-platform returned 202 Accepted")
+            record("TTS DISPATCH (sleep-audio-platform)", PASS,
+                   "N/A", "N/A", "202 Accepted — pipeline running async", "N/A")
+        else:
+            print("[test1b] FAIL — dispatch returned non-202 or connection error (check logs above)")
+            record("TTS DISPATCH (sleep-audio-platform)", FAIL,
+                   "N/A", "N/A", "Non-202 or connection error", "N/A",
+                   error="See console output above for status code / error detail")
     except Exception as e:
-        print(f"[test1b] ERROR importing tts_pipeline: {e}")
-        record("TTS PIPELINE (local)", FAIL, "N/A", "N/A", "N/A", "N/A", str(e)[:120])
-        return
-
-    if missing:
-        msg = "Secrets needed before TTS can run: " + ", ".join(missing)
-        print(f"[test1b] BLOCK — {msg}")
-        print(f"[test1b] Copy these from sleep-audio-platform Replit Secrets into beezy-agents.")
-        record("TTS PIPELINE (local)", BLOCK,
-               "N/A", "N/A", "N/A (secrets missing)", "N/A", error=msg)
-        return
-
-    print("[test1b] PASS — tts_pipeline imported, chunker verified, all secrets present")
-    record("TTS PIPELINE (local)", PASS,
-           "N/A", "N/A", "Worker ready — ElevenLabs+Buzzsprout secrets configured", "N/A")
+        print(f"[test1b] ERROR: {e}")
+        traceback.print_exc()
+        record("TTS DISPATCH (sleep-audio-platform)", FAIL, "N/A", "N/A", "N/A", "N/A", str(e)[:120])
 
 
 # =========================================================================

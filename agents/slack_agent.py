@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from datetime import date, datetime, timezone
 
@@ -805,7 +806,10 @@ def _process_new_episodes(conn) -> None:
             try:
                 s, e = text.find("{"), text.rfind("}")
                 if s != -1:
-                    metadata = json.loads(text[s:e+1])
+                    raw = text[s:e+1]
+                    # Slack wraps URLs as <https://...> — strip angle brackets before JSON parse
+                    raw = re.sub(r'<(https?://[^>|]+)(?:\|[^>]*)?>',r'\1', raw)
+                    metadata = json.loads(raw)
                     title = metadata.get("title", "?")
                     print(f"[slack_agent] Episode ready: {title}")
                     from agents.klaviyo_deployer import deploy_episode
