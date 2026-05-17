@@ -37,6 +37,9 @@ HM_PAGE_CSS = (
 
 STYLES = {
     "outer":            "max-width:700px; margin:0 auto; padding:40px 20px;",
+    "audio_box":        "background:#fff; border:1px solid #e8dcc8; border-radius:6px; padding:24px 28px; margin:0 0 35px 0;",
+    "audio_label":      "font-size:13px; color:#8b4513; letter-spacing:1.4px; text-transform:uppercase; font-weight:bold; margin:0 0 14px 0; font-family:Georgia, serif;",
+    "audio_sub":        "font-size:14px; color:#8b7355; margin:12px 0 0 0; font-family:Georgia, serif;",
     "breadcrumb":       "font-size:16px; color:#8b7355; margin:0 0 30px 0;",
     "breadcrumb_link":  "color:#8b7355; text-decoration:none;",
     "meta":             "font-size:16px; color:#8b7355; margin:0 0 10px 0;",
@@ -244,6 +247,16 @@ SUBSCRIBE_BOX_HTML = """<div id="hive-mind-pre-sub">
 SUBSCRIBE_SCRIPT = """<script>(function(){var SUB_KEY="bb_hivemind_sub";function showSubscribed(){var pre=document.getElementById("hive-mind-pre-sub");var post=document.getElementById("hive-mind-post-sub");if(pre)pre.style.display="none";if(post)post.style.display="block"}var params=new URLSearchParams(window.location.search);if(params.get("subscriber")==="true"||params.get("s")==="1"){try{localStorage.setItem(SUB_KEY,"true")}catch(_){}}try{if(localStorage.getItem(SUB_KEY)==="true")showSubscribed()}catch(_){}var form=document.getElementById("hive-mind-subscribe-form");if(form){form.addEventListener("submit",function(n){n.preventDefault();var t=document.getElementById("hive-mind-email").value;if(t){var e=this.querySelector("button");e.textContent="Subscribing...";e.disabled=!0;fetch("https://a.klaviyo.com/client/subscriptions/?company_id=W8SW8k",{method:"POST",headers:{"Content-Type":"application/json",revision:"2024-10-15"},body:JSON.stringify({data:{type:"subscription",attributes:{custom_source:"Hive Mind Issue Page",profile:{data:{type:"profile",attributes:{email:t}}}},relationships:{list:{data:{type:"list",id:"Y6VSre"}}}}})}).then(function(i){if(i.ok||i.status===202){try{localStorage.setItem(SUB_KEY,"true")}catch(_){}showSubscribed()}else{document.getElementById("hive-mind-error").style.display="block";e.textContent="Subscribe";e.disabled=!1}}).catch(function(){document.getElementById("hive-mind-error").style.display="block";e.textContent="Subscribe";e.disabled=!1})}})}})();</script>"""
 
 
+def _buzzsprout_embed_url(url: str) -> str:
+    """Convert a Buzzsprout canonical URL to the iframe embed URL."""
+    if not url:
+        return ""
+    if "client_source=small_player" in url:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}client_source=small_player&iframe=true"
+
+
 def build_page_html(issue: dict[str, Any]) -> str:
     """Build the inline-styled Hive Mind issue page body HTML.
 
@@ -261,6 +274,7 @@ def build_page_html(issue: dict[str, Any]) -> str:
     read_time = issue.get("read_time_min") or 5
     teaser = (issue.get("until_next_teaser") or "").strip()
     body_md = issue.get("long_form_body") or ""
+    buzzsprout_url = (issue.get("buzzsprout_url") or "").strip()
 
     blocks = _parse_body(body_md)
     main_blocks, callout_blocks = _split_callout(blocks)
@@ -302,6 +316,19 @@ def build_page_html(issue: dict[str, Any]) -> str:
     parts.append(
         f'<img src="{cover_url}" width="100%" style="{STYLES["cover_img"]}" alt="{alt_text}">'
     )
+
+    # Buzzsprout audio player (shown only when buzzsprout_url is set on the issue)
+    if buzzsprout_url:
+        embed_url = _buzzsprout_embed_url(buzzsprout_url)
+        parts.append(
+            f'<div style="{STYLES["audio_box"]}">'
+            f'<p style="{STYLES["audio_label"]}">Listen to This Issue</p>'
+            f'<iframe src="{embed_url}" loading="lazy" width="100%" height="200" '
+            f'frameborder="0" scrolling="no" '
+            f'title="The Hive Mind Issue {issue_num_padded} — Audio"></iframe>'
+            f'<p style="{STYLES["audio_sub"]}">Prefer reading? Continue below ↓</p>'
+            f'</div>'
+        )
 
     # Main body
     if main_html:

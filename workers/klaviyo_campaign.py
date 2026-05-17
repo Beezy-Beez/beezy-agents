@@ -195,7 +195,7 @@ def _create_page_for_issue(issue_number: int) -> dict:
             SELECT number, page_title, page_dek, page_breadcrumb_label,
                    page_slug, long_form_body, until_next_teaser, read_time_min,
                    cover_image_url, shopify_image_id, shopify_image_url,
-                   preview_text
+                   preview_text, buzzsprout_url
             FROM issues WHERE number = %s
             """,
             (issue_number,),
@@ -208,7 +208,7 @@ def _create_page_for_issue(issue_number: int) -> dict:
         number, page_title, page_dek, page_breadcrumb_label,
         page_slug, long_form_body, until_next_teaser, read_time_min,
         cover_image_url, shopify_image_id, shopify_image_url,
-        preview_text,
+        preview_text, buzzsprout_url,
     ) = row
 
     _local_vals = {
@@ -221,16 +221,17 @@ def _create_page_for_issue(issue_number: int) -> dict:
         raise ValueError(f"Issue {issue_number} missing required fields for page: {missing}")
 
     issue_dict = {
-        "number":               number,
-        "page_title":           page_title,
-        "page_dek":             page_dek,
+        "number":                number,
+        "page_title":            page_title,
+        "page_dek":              page_dek,
         "page_breadcrumb_label": page_breadcrumb_label or "",
-        "page_slug":            page_slug,
-        "long_form_body":       long_form_body,
-        "until_next_teaser":    until_next_teaser or "",
-        "read_time_min":        read_time_min,
-        "cover_image_url":      cover_image_url,
-        "shopify_image_url":    shopify_image_url,
+        "page_slug":             page_slug,
+        "long_form_body":        long_form_body,
+        "until_next_teaser":     until_next_teaser or "",
+        "read_time_min":         read_time_min,
+        "cover_image_url":       cover_image_url,
+        "shopify_image_url":     shopify_image_url,
+        "buzzsprout_url":        buzzsprout_url or "",
     }
 
     if shopify_image_id and shopify_image_url:

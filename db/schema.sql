@@ -170,7 +170,9 @@ CREATE TABLE IF NOT EXISTS issues (
     klaviyo_campaign_id         TEXT,
     klaviyo_template_id         TEXT,
     klaviyo_message_id          TEXT,
-    campaign_drafted_at         TIMESTAMPTZ
+    campaign_drafted_at         TIMESTAMPTZ,
+    -- Migration 012 — Buzzsprout audio embed
+    buzzsprout_url              TEXT
 );
 CREATE INDEX IF NOT EXISTS issues_status_number_idx ON issues (status, number DESC);
 CREATE INDEX IF NOT EXISTS idx_issues_shopify_page_id ON issues (shopify_page_id) WHERE shopify_page_id IS NOT NULL;

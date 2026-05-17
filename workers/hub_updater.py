@@ -274,6 +274,7 @@ def _update_hub(handle: str, items_html: str) -> str:
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 def _all_published_issues() -> list[dict]:
+    """Return all Hive Mind issues that have a Klaviyo campaign (scheduled or sent), newest first."""
     try:
         from db.connection import get_conn
         with get_conn() as conn:
@@ -281,7 +282,7 @@ def _all_published_issues() -> list[dict]:
                 """SELECT number, subject_line, page_dek, cover_image_url,
                           shopify_page_url, pillar, read_time_min
                    FROM issues
-                   WHERE status = 'published'
+                   WHERE status IN ('scheduled', 'published')
                    ORDER BY number DESC"""
             ).fetchall()
         return [
@@ -301,13 +302,59 @@ def _all_published_issues() -> list[dict]:
         return []
 
 
+def _latest_sent_issue() -> dict | None:
+    """Return the most recently *sent* Hive Mind issue.
+
+    'Sent' = scheduled_send_at <= NOW() OR published_at IS NOT NULL,
+    whichever is earlier.  Issues prepared ahead of time (scheduled_send_at
+    in the future) are excluded — they haven't gone out yet.
+    """
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            row = conn.execute(
+                """SELECT number, page_title, subject_line, page_dek,
+                          cover_image_url, shopify_image_url, shopify_page_url,
+                          pillar, read_time_min
+                   FROM issues
+                   WHERE klaviyo_campaign_id IS NOT NULL
+                     AND (
+                       (scheduled_send_at IS NOT NULL AND scheduled_send_at <= NOW())
+                       OR published_at IS NOT NULL
+                       OR (campaign_drafted_at IS NOT NULL AND campaign_drafted_at < CURRENT_DATE)
+                     )
+                   ORDER BY COALESCE(scheduled_send_at, published_at, campaign_drafted_at) DESC
+                   LIMIT 1"""
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "number":            row[0],
+            "page_title":        row[1],
+            "subject_line":      row[2],
+            "page_dek":          row[3],
+            "cover_image_url":   row[4],
+            "shopify_image_url": row[5],
+            "shopify_page_url":  row[6],
+            "pillar":            row[7],
+            "read_time_min":     row[8],
+        }
+    except Exception as exc:
+        print(f"[hub_updater] _latest_sent_issue query failed: {exc}")
+        return None
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def add_issue_to_hubs(issue: dict) -> dict[str, str]:
     """Called after a Hive Mind issue's Klaviyo campaign is created (page is live).
 
-    1. Rebuilds /pages/the-hive-mind from all published DB issues (newest first).
-    2. Updates the "Latest Issue" featured box on /pages/sleep-science-hub.
+    Rebuilds /pages/the-hive-mind from all issues with campaigns (newest first).
+
+    The "Latest Issue" featured box on /pages/sleep-science-hub is NOT updated here
+    — it is updated daily by refresh_ssh_featured_issue() (called from morning_brief
+    at 8:05am) so it only reflects issues that have already been sent, never a
+    future scheduled draft.
 
     Returns {handle: status} for each hub touched.
     """
@@ -320,10 +367,23 @@ def add_issue_to_hubs(issue: dict) -> dict[str, str]:
     all_cards = "".join(_issue_card(i) for i in all_issues)
     results["the-hive-mind"] = _update_hub("the-hive-mind", all_cards)
 
-    # /pages/sleep-science-hub — update only the featured box (via SSH_FEATURED sentinels)
-    results["sleep-science-hub"] = update_ssh_featured_issue(issue)
-
     return results
+
+
+def refresh_ssh_featured_issue() -> str:
+    """Update the 'Latest Issue' box on /pages/sleep-science-hub with the most
+    recently *sent* Hive Mind issue (not just the most recently created draft).
+
+    Called from morning_brief at 8:05am daily so the page reflects the 8pm
+    send from the night before.
+
+    Returns 'updated', 'migrated+updated', 'no_sent_issue', or 'error: ...'
+    """
+    issue = _latest_sent_issue()
+    if not issue:
+        print("[hub_updater] refresh_ssh_featured: no sent issue found — skipping")
+        return "no_sent_issue"
+    return update_ssh_featured_issue(issue)
 
 
 # ── SSH featured-box updater ──────────────────────────────────────────────────

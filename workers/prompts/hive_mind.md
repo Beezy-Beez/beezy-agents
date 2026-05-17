@@ -87,19 +87,23 @@ long_form_body is editorial body ONLY — from the opening scene through the fin
 
 Total word count target: 3,500–4,500 words. Aim for ~4,000. The reader has time. The depth is the point. Section word ranges above are guidance, not strict — distribute as the material requires.
 
-EMAIL TEASER BODY — 600–900 WORDS, ENDS ON CLIFFHANGER
-This becomes the Klaviyo email body. Same opening as the long-form (the reader should feel continuity when she clicks through). Builds momentum into the mechanism. Then STOPS before the mechanism is fully resolved — at the most curiosity-loaded moment — followed by a single line CTA.
+EMAIL TEASER BODY — 200–300 WORDS, ENDS ON HOOK
 
-Structure:
+This becomes the Klaviyo email body. Keep it short and intentionally incomplete — the email's only job is to make the reader click through to the full story. Do not explain the mechanism in the email.
 
-[OPENING — same person, year, and place as the long-form opening. 250–400 words. Identical or very close phrasing through the opening 2 paragraphs is fine.]
-[ONE more section that sets up the mechanism. Builds the question. 200–300 words.]
-[Then the cliffhanger: the moment the reader is leaning in, where the discovery is about to land. One short paragraph or even one short sentence that promises the answer.]
+Structure (3–4 paragraphs total):
+
+[OPENING PARAGRAPH — same person, year, and place as the long-form opening. 80–120 words. Identical or very close phrasing through the first sentence is fine. This paragraph is extracted by the email template and rendered as the H1 narrative hook. Make it vivid, specific, and scene-setting.]
+
+[BODY PARAGRAPH — 60–100 words. Deepens the scene just enough to build tension. Introduces the question the issue will answer. Does NOT resolve anything or name the mechanism.]
+
+[HOOK — 1–2 sentences maximum. The moment the reader is leaning in, where the discovery is about to land. One specific, unresolved question or a startling fact that creates maximum curiosity pull. Does NOT reveal the mechanism.]
+
 **Continue reading on the page →**
 
-Critical: the teaser must STOP BEFORE the mechanism is fully revealed. The reader should feel a pull. If you've explained the answer, you've gone too far. If she could close the email satisfied, you've failed.
+Critical: the email_teaser_body must be 200–300 words total — three to four double-newline-separated paragraphs. If she could close the email satisfied, you've gone too far.
 
-After the cliffhanger and the CTA, do NOT include the "Until next issue" block, the closing signature, the testimonial, the editorial hubs, or the footer line. Those all live in the email shell that Klaviyo wraps around this body.
+After the CTA, do NOT include the "Until next issue" block, the closing signature, the testimonial, the editorial hubs, or the footer line. Those live in the email shell.
 
 What the Newsletter NEVER Does (Post Issue 006)
 Never includes a product offer, discount code, or Hive Club mention in the body
@@ -133,14 +137,20 @@ SEO Title & Meta Description
 page_seo_title: under 60 chars, descriptive, ends with | The Hive Mind. Example: Vagus Nerve and Sleep: Why Your Exhale Matters | The Hive Mind
 page_meta_description: under 155 chars, includes the narrative hook and the core insight. Should make someone reading a Google result click.
 Cover Image Prompt
-Generate a prompt for nano_banana_2, 16:9 aspect ratio. The image must:
+Generate a prompt for the Higgsfield Soul Standard model, 16:9 aspect ratio, maximum 12 words. The image must:
 
-Connect to the reader emotionally
-Reference the historical figure, place, or moment from the opening when possible
-Use warm, candlelit, parchment-toned colors (amber, deep brown, soft gold)
-Avoid stock-photo aesthetics — editorial, almost painted quality
-Never include text overlays
-Never depict the brand product, just sleep / rest / nature / history
+- Always feature: **white woman 50s** in a moment connected to the issue's emotional core
+- Evoke the feeling of the opening scene — sleep, rest, wonder, discovery, or quiet revelation
+- Reference the historical figure's world when possible (a candle-lit study, soft night air, a dreaming face, a moment of stillness)
+- Create emotional pull and curiosity — the image should make a reader want to click through
+- Use warm, candlelit, parchment-toned colors: amber, deep brown, soft gold, honey
+- Painterly, editorial quality — not stock photo, not literal or documentary
+- No text overlays. No product imagery. Maximum 12 words.
+
+Examples:
+- "white woman 50s sleeping candlelit study warm amber glow dreaming"
+- "white woman 50s twilight bedroom golden light drifting deep rest"
+- "white woman 50s warm night ancient books soft candle wonder"
 Output Format
 Return ONLY a JSON object — no markdown fences, no prose before or after. The object must have exactly these fields:
 
@@ -171,7 +181,7 @@ Self-Check Before Returning
  Follows the 5-step Duhigg skeleton
  long_form_body is 3,500–4,500 words
  long_form_body ends at the final sentence of "The one thing worth trying tonight" — no H1, no read-time line, no "Until next issue" block, no sign-off, no footer line ("The honey we personally use…")
- email_teaser_body is 600–900 words AND stops before the mechanism is revealed
+ email_teaser_body is 200–300 words, three to four paragraphs, stops before the mechanism is revealed
  No bullet points or numbered lists anywhere in either body
  No product pitch in either body
  Subject line is second-person and counterintuitive

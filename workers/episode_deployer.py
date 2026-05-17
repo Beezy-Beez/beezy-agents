@@ -470,6 +470,56 @@ def _save_episode(meta: dict[str, Any], page_url: str,
         print(f"[episode_deployer] DB save failed (non-fatal): {exc}")
 
 
+# ── Cover image generation ────────────────────────────────────────────────────
+
+def _is_product_image(url: str) -> bool:
+    """Return True if the URL looks like a Shopify product image (not a generated cover)."""
+    return bool(url and "/products/" in url)
+
+
+def _episode_image_prompt(meta: dict[str, Any]) -> str:
+    """Build a ≤12-word Higgsfield image prompt tailored to the episode type."""
+    episode_type = meta.get("episode_type", "sleep_story")
+    title = meta.get("title", "")
+
+    if episode_type == "morning_meditation":
+        return "white woman 60s morning sunlight window energized radiant joyful awakening"
+    if episode_type in ("guided_meditation", "affirmation_meditation"):
+        return "white woman 60s serene bedroom warm golden light sleeping peacefully smiling"
+    if episode_type == "soundscape":
+        return "white woman 50s bedroom night soft candlelight atmospheric warm sleep"
+    # sleep_story — derive 1-2 title keywords for contextual grounding
+    stops = {"the", "a", "an", "of", "in", "at", "to", "for", "with", "and", "or",
+             "is", "it", "on", "by", "from", "her", "his", "my", "your", "this", "that"}
+    words = re.sub(r"[^a-zA-Z\s]", "", title).lower().split()
+    kws = [w for w in words if w not in stops][:2]
+    kw_str = " ".join(kws) if kws else "enchanted dream"
+    return f"white woman 50s dreaming {kw_str} warm bedroom moonlight soft golden"
+
+
+def _generate_episode_image(meta: dict[str, Any]) -> str:
+    """Generate a type-appropriate cover image via Higgsfield and upload to Shopify CDN.
+
+    Returns CDN URL, or '' on failure (non-fatal — caller logs and continues).
+    """
+    try:
+        from workers.image_gen import generate_cover
+        from workers.shopify_publisher import upload_image_to_shopify
+
+        prompt = _episode_image_prompt(meta)
+        title  = meta.get("title", "episode")
+        print(f"[episode_deployer] Generating cover image: {prompt!r}")
+
+        result = generate_cover(prompt)
+        cdn    = upload_image_to_shopify(result.url, alt=title)
+        url    = cdn["url"]
+        print(f"[episode_deployer] Cover image on CDN: {url[:80]}...")
+        return url
+    except Exception as exc:
+        print(f"[episode_deployer] Cover image generation failed (non-fatal): {exc}")
+        return ""
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def run(slot: dict[str, Any]) -> dict[str, Any] | str:
@@ -502,6 +552,13 @@ def _deploy_pre_produced(slot: dict[str, Any], meta: dict[str, Any]) -> dict[str
     page_url     = f"{_SHOPIFY_DOMAIN}/pages/{page_slug}"
 
     print(f"[episode_deployer] Deploying '{title}' ({label}) — {slot_date}")
+
+    # ── 0. Cover image (generate if missing or a Shopify product image) ───────
+    current_img = (meta.get("hero_image_url") or meta.get("cover_image_url") or "").strip()
+    if not current_img or _is_product_image(current_img):
+        cover_url = _generate_episode_image(meta)
+        if cover_url:
+            meta = {**meta, "hero_image_url": cover_url, "cover_image_url": cover_url}
 
     # ── 1. Shopify page (isPublished=True) ────────────────────────────────
     try:
