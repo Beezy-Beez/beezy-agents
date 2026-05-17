@@ -480,9 +480,10 @@ def create_campaign_for_issue(issue_number: int) -> dict:
             f"From:       {from_label} <{from_email}>",
             f"Audiences:  SUPER ENGAGED 48hr + ENGAGED 30d + Hive Mind list",
             f"Excluded:   ALL CUSTOMERS ONLY",
-            f"UTM:        7 params (matches Issue 014 reference)",
             f"Smart send: OFF",
             f"Status:     DRAFT -- awaiting your review",
+            f"Klaviyo:    {admin_url}",
+            f"Page:       {page_url}",
         ],
         body=f"Klaviyo: {admin_url}\n\nPage: {page_url}",
     )
