@@ -116,14 +116,15 @@ def run_sleep_audio_slot(slot: dict) -> str:
     cover_url = ""
     try:
         from workers.image_gen import generate_cover
-        from workers.episode_deployer import _episode_image_prompt
+        from workers.episode_deployer import _episode_image_prompt, _NEGATIVE_PROMPT
         image_prompt = _episode_image_prompt({
             "episode_type": episode_type,
             "title": title,
             "description_short": description_short,
         })
         print(f"[sleep_audio] Image prompt: {image_prompt!r}")
-        cover_url = generate_cover(image_prompt).url
+        print(f"[sleep_audio] Negative prompt: {_NEGATIVE_PROMPT!r}")
+        cover_url = generate_cover(image_prompt, negative_prompt=_NEGATIVE_PROMPT).url
         print(f"[sleep_audio] Cover generated: {cover_url[:70]}...")
     except Exception as exc:
         print(f"[sleep_audio] Image gen failed (non-fatal): {exc}")

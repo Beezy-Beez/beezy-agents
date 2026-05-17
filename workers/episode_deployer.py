@@ -624,6 +624,56 @@ def _save_episode(meta: dict[str, Any], page_url: str,
 
 # ── Cover image generation ────────────────────────────────────────────────────
 
+# Hard exclusions sent with every Higgsfield call.
+_NEGATIVE_PROMPT = (
+    "kitchen, cooking, food, honey jar, honey product, yellow sweater, "
+    "warm artificial light, fluorescent light, orange dominant, amber dominant, "
+    "indoor cooking, product photography, stock photo, yellow lighting, orange background"
+)
+
+# Maps story title keywords → a specific cinematic landscape description.
+# Checked against both the episode title and description_short (lowercase).
+_SCENE_MAP = {
+    "bridge":     "ancient stone bridge twilight misty river moonlight",
+    "lighthouse": "lighthouse dusk coastal cliffs silver sea moonlight",
+    "garden":     "moonlit garden silver dew roses soft mist",
+    "forest":     "ancient forest moonlight silver light trees morning mist",
+    "cottage":    "stone cottage twilight moonlight garden path silver",
+    "ocean":      "calm ocean twilight silver moonlight peaceful horizon",
+    "river":      "slow river dusk moonlight silver willows reflections",
+    "mountain":   "mountain meadow twilight moonlight silver mist peaks",
+    "lake":       "still lake dusk moonlight silver reflection reeds",
+    "train":      "empty train platform night soft blue lights mist",
+    "field":      "open field twilight moonlight silver grass breeze",
+    "beach":      "quiet beach twilight silver moonlight calm waves",
+    "valley":     "valley dusk moonlight silver mist gentle hills",
+    "path":       "moonlit forest path silver light trees mist",
+    "road":       "empty road dusk moonlight silver trees quiet",
+    "meadow":     "open meadow twilight moonlight silver mist flowers",
+    "rain":       "rain on still water ripples silver blue moonlight",
+    "snow":       "snow landscape blue moonlight silver silence",
+    "sea":        "calm sea twilight silver moonlight distant horizon",
+    "cliff":      "coastal cliffs dusk silver moonlight sea below",
+    "harbor":     "harbor dusk moonlight silver water boats still",
+    "farm":       "farmhouse dusk moonlight silver hills peaceful",
+    "village":    "old village evening moonlight silver stone paths",
+    "inn":        "stone inn evening moonlight soft silver light",
+    "cave":       "cave entrance moonlight silver mist forest outside",
+    "island":     "small island twilight moonlight silver sea reflections",
+    "desert":     "desert night blue moonlight silver sand dunes stars",
+    "castle":     "ancient castle twilight moonlight silver stone mist",
+    "tower":      "stone tower twilight moonlight silver mist horizon",
+    "chapel":     "stone chapel evening moonlight silver path mist",
+    "abbey":      "stone abbey moonlight silver mist trees evening",
+    "shore":      "rocky shore twilight silver moonlight waves mist",
+    "bay":        "calm bay twilight moonlight silver water reflections",
+    "cove":       "sheltered cove twilight moonlight silver sea mist",
+}
+
+# Fallback when no scene keyword is found in title or description.
+_GENERIC_LANDSCAPE = "moonlit meadow silver mist blue twilight gentle fog"
+
+
 def _is_product_image(url: str) -> bool:
     """Return True if the URL looks like a Shopify product image (not a generated cover)."""
     return bool(url and "/products/" in url)
@@ -632,26 +682,30 @@ def _is_product_image(url: str) -> bool:
 def _episode_image_prompt(meta: dict[str, Any]) -> str:
     """Build a Higgsfield image prompt (≤12 words) from episode context.
 
-    Palette: muted creams, soft blues, silver moonlight. No warm/golden/candlelight.
-    Person (when included): Caucasian beautiful woman mid-60s.
-    Style: cinematic, painterly, dreamlike — not stock photography.
+    Palette: soft blues, silver moonlight, muted creams, gentle fog.
+    NO warm/golden/amber/candlelight as dominant tones.
+    Person (when included): Caucasian woman early 50s.
+    Style: cinematic, painterly, dreamlike.
+    Sleep stories: use scene derived from title/description — NOT a person by default.
     """
     episode_type = meta.get("episode_type", "sleep_story")
-    title = meta.get("title", "")
+    title = meta.get("title", "").lower()
+    desc  = (meta.get("description_short") or "").strip().lower()
 
     if episode_type == "morning_meditation":
-        return "Caucasian woman 60s dawn window calm soft blue cinematic dreamlike"
+        return "Caucasian woman early 50s dawn window pale blue calm cinematic painterly"
     if episode_type in ("guided_meditation", "affirmation_meditation"):
-        return "Caucasian woman 60s moonlight bedroom serene calm drifting soft blue cinematic"
+        return "Caucasian woman early 50s moonlit bedroom serene pale blue drifting cinematic"
     if episode_type == "soundscape":
-        return "twilight landscape moonlight silver mist calm dreamlike cinematic painterly peaceful"
-    # sleep_story — derive scene from title keywords; person optional
-    stops = {"the", "a", "an", "of", "in", "at", "to", "for", "with", "and", "or",
-             "is", "it", "on", "by", "from", "her", "his", "my", "your", "this", "that"}
-    words = re.sub(r"[^a-zA-Z\s]", "", title).lower().split()
-    kws = [w for w in words if w not in stops][:2]
-    kw_str = " ".join(kws) if kws else "twilight path"
-    return f"{kw_str} soft moonlight mist cinematic dreamlike peaceful calm silver blue"
+        return "twilight forest moonlight silver mist still water reflections cinematic painterly"
+
+    # sleep_story: derive scene from title + description keywords — no person by default
+    for kw, scene in _SCENE_MAP.items():
+        if kw in title or kw in desc:
+            return f"{scene} cinematic painterly dreamlike"
+
+    # No recognizable scene keyword — use beautiful landscape fallback
+    return f"{_GENERIC_LANDSCAPE} cinematic painterly dreamlike"
 
 
 def _generate_episode_image(meta: dict[str, Any]) -> str:
@@ -666,8 +720,9 @@ def _generate_episode_image(meta: dict[str, Any]) -> str:
         prompt = _episode_image_prompt(meta)
         title  = meta.get("title", "episode")
         print(f"[episode_deployer] Generating cover image: {prompt!r}")
+        print(f"[episode_deployer] Negative prompt: {_NEGATIVE_PROMPT!r}")
 
-        result = generate_cover(prompt)
+        result = generate_cover(prompt, negative_prompt=_NEGATIVE_PROMPT)
         cdn    = upload_image_to_shopify(result.url, alt=title)
         url    = cdn["url"]
         print(f"[episode_deployer] Cover image on CDN: {url[:80]}...")

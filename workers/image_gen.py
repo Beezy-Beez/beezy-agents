@@ -60,6 +60,7 @@ def generate_cover(
     model: str = DEFAULT_MODEL,
     aspect_ratio: str = DEFAULT_ASPECT_RATIO,
     resolution: Optional[str] = DEFAULT_RESOLUTION,
+    negative_prompt: Optional[str] = None,
     extra_args: Optional[dict[str, Any]] = None,
     poll_interval_seconds: float = 3.0,
     timeout_seconds: float = 180.0,
@@ -76,6 +77,8 @@ def generate_cover(
     }
 
     body: dict[str, Any] = {"prompt": prompt}
+    if negative_prompt:
+        body["negative_prompt"] = negative_prompt
     if aspect_ratio:
         body["aspect_ratio"] = aspect_ratio
     if resolution:
