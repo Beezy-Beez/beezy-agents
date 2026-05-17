@@ -98,8 +98,8 @@ _EPISODE_TYPE_LABELS = {
 _EPISODE_HUBS = {
     "sleep_story":            [],
     "soundscape":             [],
-    "guided_meditation":      ["meditation-library"],
-    "affirmation_meditation": ["meditation-library"],
+    "guided_meditation":      [],
+    "affirmation_meditation": [],
     "morning_meditation":     ["morning-wellness-hub"],
 }
 

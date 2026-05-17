@@ -70,8 +70,8 @@ _EPISODE_LABELS = {
 _HUB_MAP: dict[str, list[str]] = {
     "sleep_story":            [],
     "soundscape":             [],
-    "guided_meditation":      ["meditation-library"],
-    "affirmation_meditation": ["meditation-library"],
+    "guided_meditation":      [],
+    "affirmation_meditation": [],
     "morning_meditation":     ["morning-wellness-hub"],
 }
 
@@ -203,8 +203,8 @@ _CRUMB_CONFIG: dict[str, tuple[str, str, str]] = {
     # episode_type → (hub_label, hub_url, crumb_label)
     "sleep_story":            ("Sleep Science", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub", "Sleep Story"),
     "soundscape":             ("Sleep Science", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub", "Sleep Soundscape"),
-    "guided_meditation":      ("Sleep Science", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub", "Guided Sleep Meditation"),
-    "affirmation_meditation": ("Sleep Science", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub", "Affirmation Meditation"),
+    "guided_meditation":      ("Meditation Library", f"{_SHOPIFY_DOMAIN}/pages/meditation-library", "Guided Sleep Meditation"),
+    "affirmation_meditation": ("Meditation Library", f"{_SHOPIFY_DOMAIN}/pages/meditation-library", "Affirmation Meditation"),
     "morning_meditation":     ("Morning Wellness", f"{_SHOPIFY_DOMAIN}/pages/morning-wellness-hub", "Guided Morning Meditation"),
 }
 
@@ -214,7 +214,7 @@ _BACK_CONFIG: dict[str, tuple[str, str]] = {
     "soundscape":   ("the Sleep Science Hub", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub"),
     "guided_meditation":      ("the Meditation Library", f"{_SHOPIFY_DOMAIN}/pages/meditation-library"),
     "affirmation_meditation": ("the Meditation Library", f"{_SHOPIFY_DOMAIN}/pages/meditation-library"),
-    "morning_meditation":     ("the Meditation Library", f"{_SHOPIFY_DOMAIN}/pages/meditation-library"),
+    "morning_meditation":     ("the Morning Wellness Hub", f"{_SHOPIFY_DOMAIN}/pages/morning-wellness-hub"),
 }
 
 _ABOUT_LABEL: dict[str, str] = {

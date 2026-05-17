@@ -66,22 +66,37 @@ def _pacing() -> dict:
         as_of = d.get("as_of")
         if as_of:
             try:
-                cache_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+                # Handle formats: "2026-05-15 00:29 UTC", "2026-05-15T00:29:00Z", ISO with offset
+                as_of_clean = (
+                    as_of.replace(" UTC", "+00:00")
+                         .replace("Z", "+00:00")
+                         .replace(" ", "T")
+                )
+                if "+" not in as_of_clean and len(as_of_clean) <= 16:
+                    as_of_clean += "+00:00"
+                cache_dt = datetime.fromisoformat(as_of_clean)
                 if (datetime.now(NY) - cache_dt).total_seconds() > 8 * 3600:
                     stale = True
             except Exception:
-                pass
+                stale = True  # unparseable timestamp → treat as stale
         return True
+
+    def _refresh_cache():
+        """Pull live from Klaviyo and reload into locals."""
+        try:
+            from workers.pacing_cache import refresh_pacing_cache
+            refresh_pacing_cache()
+            _load_cache()
+        except Exception as e:
+            print(f"[dashboard] inline pacing refresh failed: {e}")
 
     try:
         if not _load_cache():
-            # Cache missing — pull live from Klaviyo and store it now
-            try:
-                from workers.pacing_cache import refresh_pacing_cache
-                refresh_pacing_cache()
-                _load_cache()
-            except Exception as e:
-                print(f"[dashboard] inline pacing refresh failed: {e}")
+            _refresh_cache()
+        elif stale:
+            # Cache exists but is >8h old — pull fresh silently so numbers are current
+            stale = False
+            _refresh_cache()
     except Exception:
         pass
 
@@ -708,6 +723,114 @@ def _store_revenue() -> dict:
     }
 
 
+def _shopify_customer_stats() -> dict:
+    """Return returning-customer stats for MTD via paginated Shopify Orders API.
+    Cached in agent_state['shopify_customer_stats'] for 4h to avoid repeated pagination."""
+    # Check cache first
+    cache_row = _q1("SELECT value, updated_at FROM agent_state WHERE key='shopify_customer_stats'")
+    if cache_row:
+        try:
+            cached = json.loads(cache_row[0])
+            age_h = (datetime.now(NY) - datetime.fromisoformat(
+                str(cache_row[1]).replace(" ", "T").split("+")[0] + "+00:00"
+            ).astimezone(NY)).total_seconds() / 3600
+            if age_h < 4:
+                return cached
+        except Exception:
+            pass
+
+    # Paginate through MTD orders to compute customer stats
+    from lib.shopify_admin import graphql
+    today = date.today()
+    month_start = today.replace(day=1).isoformat()
+    query = """
+query($cursor: String) {
+  orders(first: 250, after: $cursor,
+         query: "created_at:>=""" + month_start + """T00:00:00 financial_status:paid") {
+    edges {
+      node {
+        customer { numberOfOrders }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}"""
+    total = 0
+    returning = 0
+    unique_customers = set()
+    cursor = None
+    for _ in range(20):  # max 20 pages = 5,000 orders
+        try:
+            result = graphql(query, variables={"cursor": cursor})
+        except Exception as e:
+            print(f"[dashboard] Shopify customer stats page failed: {e}")
+            break
+        edges = result.get("orders", {}).get("edges", [])
+        page_info = result.get("orders", {}).get("pageInfo", {})
+        for edge in edges:
+            total += 1
+            n_orders = int(edge["node"].get("customer", {}).get("numberOfOrders", 1) or 1)
+            if n_orders > 1:
+                returning += 1
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+
+    new = total - returning
+    rate = round(returning / total * 100, 1) if total else 0.0
+    result_dict = {
+        "orders": total,
+        "returning_customers": returning,
+        "new_customers": new,
+        "returning_customer_rate": rate,
+    }
+    # Cache result
+    try:
+        with _conn() as conn:
+            conn.execute(
+                "INSERT INTO agent_state (key, value, updated_at) VALUES ('shopify_customer_stats', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                (json.dumps(result_dict),)
+            )
+            conn.commit()
+    except Exception:
+        pass
+    return result_dict
+
+
+def _shopify_store_live() -> dict:
+    """MTD store metrics from the performance table (net revenue, fresh from ingestion)
+    plus live returning-customer rate from Shopify Orders API (4h cache)."""
+    # Revenue + order count from performance table (ingested every 4h)
+    mtd_row = _q1(
+        """SELECT COALESCE(SUM(rev),0), COUNT(*) FROM (
+             SELECT DISTINCT ON (dimensions->>'order_id') metric_value AS rev
+             FROM performance
+             WHERE source='shopify' AND metric_name='order_revenue'
+               AND (dimensions->>'created_at')::timestamptz >= date_trunc('month', CURRENT_DATE)
+             ORDER BY dimensions->>'order_id', measured_at DESC
+           ) t"""
+    )
+    net_sales   = round(float(mtd_row[0]) if mtd_row else 0.0, 2)
+    order_count = int(mtd_row[1]) if mtd_row else 0
+    aov         = round(net_sales / order_count, 2) if order_count else 0.0
+
+    # Customer stats via Orders API (cached 4h)
+    cstats = _shopify_customer_stats()
+
+    return {
+        "gross_sales": net_sales,   # we only store net; label correctly in HTML
+        "net_sales": net_sales,
+        "orders": order_count,
+        "customers": cstats.get("orders", order_count),
+        "returning_customers": cstats.get("returning_customers", 0),
+        "new_customers": cstats.get("new_customers", 0),
+        "returning_customer_rate": cstats.get("returning_customer_rate", 0.0),
+        "aov": aov,
+        "_source": "live",
+    }
+
+
 def _pacing_history() -> list:
     """Daily pacing snapshots — actual vs target trajectory for charting."""
     rows = _q(
@@ -1212,6 +1335,59 @@ def _html_performers(data: list) -> str:
     </div>"""
 
 
+def _html_store_perf(store: dict) -> str:
+    if store.get("_source") == "error":
+        return f"""
+    <div class="card">
+      <div class="card-title">Store Performance (MTD)</div>
+      <div class="empty-state">Could not load live Shopify data: {store.get("_error","")[:80]}</div>
+    </div>"""
+
+    net    = store["net_sales"]
+    orders = store["orders"]
+    ret    = store["returning_customers"]
+    new_c  = store.get("new_customers", 0)
+    rate   = store["returning_customer_rate"]
+    aov    = store["aov"]
+
+    rate_color = "#1e7e34" if rate >= 60 else ("#e07b00" if rate >= 40 else "#c0392b")
+
+    return f"""
+    <div class="card">
+      <div class="card-title">Store Performance (MTD — live Shopify)
+        <span class="card-title-meta">revenue from ingestion · customer rate from Orders API</span>
+      </div>
+      <div class="cc-grid" style="grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px">
+        <div class="cc-stat">
+          <div class="stat-val">${net:,.0f}</div>
+          <div class="stat-lbl">Net Revenue MTD</div>
+        </div>
+        <div class="cc-stat">
+          <div class="stat-val">{orders:,}</div>
+          <div class="stat-lbl">Orders MTD</div>
+        </div>
+        <div class="cc-stat">
+          <div class="stat-val">${aov:,.0f}</div>
+          <div class="stat-lbl">Avg Order Value</div>
+        </div>
+      </div>
+      <div class="cc-grid" style="grid-template-columns:repeat(3,1fr);gap:10px">
+        <div class="cc-stat">
+          <div class="stat-val" style="color:{rate_color}">{rate:.1f}%</div>
+          <div class="stat-lbl">Repeat Customer Rate</div>
+        </div>
+        <div class="cc-stat">
+          <div class="stat-val">{ret:,}</div>
+          <div class="stat-lbl">Returning Customers</div>
+        </div>
+        <div class="cc-stat">
+          <div class="stat-val">{new_c:,}</div>
+          <div class="stat-lbl">New Customers</div>
+        </div>
+      </div>
+    </div>"""
+
+
 def _html_learning(data: dict) -> str:
     entries = data.get("entries", [])
     rpr = data.get("rpr_by_audience", {})
@@ -1359,6 +1535,7 @@ def dashboard():
     flows = _flow_health()
     performers = _top_performers()
     learning = _learning_loop()
+    store = _shopify_store_live()
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1376,6 +1553,7 @@ def dashboard():
 </div>
 <div class="grid">
   {_html_command_center(p)}
+  {_html_store_perf(store)}
   <div class="row-2">
     {_html_approval(apv)}
     {_html_today(today_slots, next_send)}

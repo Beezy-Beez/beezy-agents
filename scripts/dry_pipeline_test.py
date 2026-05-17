@@ -352,7 +352,7 @@ def test_guided_meditation():
         record(
             "GUIDED MEDITATION", verdict,
             f"YES isPublished={page_node.get('isPublished','?')}" if page_exists else "NOT FOUND",
-            "sleep-science-hub + meditation-library",
+            "meditation-library (breadcrumb)",
             f"A:{camp_a_id[:10]}... | B:{camp_b_id[:10] if camp_b_id else 'N/A'}...",
             f"A={'YES' if smart_a else 'NO'} / B={'YES' if smart_b else 'NO'}",
         )
@@ -392,7 +392,7 @@ def test_guided_meditation():
         record(
             "GUIDED MEDITATION", verdict,
             f"YES isPublished={page_node.get('isPublished','?')}" if page_exists else "NOT FOUND",
-            "sleep-science-hub + meditation-library",
+            "meditation-library (breadcrumb)",
             f"A:{camp_a_id[:10] if camp_a_id else 'N/A'}... | B:{camp_b_id[:10] if camp_b_id else 'N/A'}...",
             f"A={'YES' if smart_a else 'NO'} / B={'YES' if smart_b else 'NO'}",
         )
