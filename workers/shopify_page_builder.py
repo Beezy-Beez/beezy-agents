@@ -27,7 +27,7 @@ STYLES = {
     "breadcrumb":       "font-size:16px; color:#8b7355; margin:0 0 30px 0;",
     "breadcrumb_link":  "color:#8b7355; text-decoration:none;",
     "meta":             "font-size:16px; color:#8b7355; margin:0 0 10px 0;",
-    "h1":               "font-size:32px; font-weight:bold; color:#2c2417; margin:0 0 12px 0; line-height:1.25; font-family:Georgia, serif;",
+    "h1":               "font-size:32px; font-weight:600; color:#2c2417; margin:0 0 12px 0; line-height:1.25; font-family:Georgia, serif;",
     "dek":              "font-size:20px; color:#5a4a3a; margin:0 0 30px 0; line-height:1.5; font-style:italic;",
     "cover_img":        "display:block; width:100%; height:auto; margin:0 0 35px 0; border-radius:4px;",
     "h2":               "font-size:22px; color:#2c2417; margin:0 0 18px 0; font-family:Georgia, serif;",
@@ -277,8 +277,9 @@ def build_page_html(issue: dict[str, Any]) -> str:
         f'</p>'
     )
 
-    # H1
-    parts.append(f'<h1 style="{STYLES["h1"]}">{page_title}</h1>')
+    # Use div instead of h1 to avoid Shopify theme CSS overriding inline styles and
+    # cascading bold/large rendering into body paragraphs.
+    parts.append(f'<div role="heading" aria-level="1" style="{STYLES["h1"]}">{page_title}</div>')
 
     # Dek
     parts.append(f'<p style="{STYLES["dek"]}">{page_dek}</p>')
