@@ -189,14 +189,6 @@ def _run_cron_jobs(now: datetime) -> None:
         except Exception as e:
             print(f"[cron] pending_schedules error: {e}")
 
-    # TTS 30-min watchdog — every 5 minutes
-    if m % 5 == 0:
-        try:
-            from workers.sleep_audio_producer import check_tts_timeouts
-            check_tts_timeouts()
-        except Exception as e:
-            print(f"[cron] tts_timeout error: {e}")
-
     # Morning briefing — 8:05am daily (after orchestrator, once per day guard)
     if h == 8 and m == 5:
         if not _ran_today("cron_morning_brief"):

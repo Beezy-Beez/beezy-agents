@@ -1,32 +1,26 @@
 """
 Sleep Audio Producer — orchestrator handler for calendar sleep_audio slots.
 
-Full automatic pipeline:
+Full automatic pipeline (runs entirely in beezy-agents — no external TTS service):
   1. invoke_skill("sleep_audio")    → script + title + description + cover_image_prompt
   2. Higgsfield image generation
   3. Shopify CDN upload
-  4. Shopify landing page (published, audio embed added later by sleep-audio-platform)
+  4. Shopify landing page (published, audio embed added later when Buzzsprout URL is known)
   5. episodes DB stub + hub pages
-  6a. If SLEEP_AUDIO_API_URL is set: POST script to sleep-audio-platform cloud API
-       → TTSPipeline runs in Replit → Buzzsprout upload → #beezy-new-episodes posted
-       → watcher creates Klaviyo campaigns + updates page with audio player
-  6b. Fallback (no API URL configured): Slack handoff with full script for Boris to run manually
+  6. TTS pipeline in background thread:
+       workers/tts_pipeline.py → ElevenLabs chunks → ffmpeg concat → Buzzsprout
+       → posts JSON to #beezy-new-episodes
+       → Slack watcher auto-creates Klaviyo campaigns + posts ✅ to #beezy-agents
 """
 from __future__ import annotations
 
-import json
-import os
 import re
+import threading
 import uuid
-from datetime import date, datetime, timezone
-
-import httpx
+from datetime import date
 
 from workers.skill_runner import invoke_skill
 from lib.slack import post_draft
-
-_SAP_URL = os.environ.get("SLEEP_AUDIO_API_URL", "").rstrip("/")   # sleep-audio-platform Replit URL
-_SAP_KEY = os.environ.get("SLEEP_AUDIO_API_KEY", "")
 
 _SHOPIFY_DOMAIN = "https://trybeezybeez.com"
 
@@ -38,17 +32,13 @@ _EPISODE_LABELS = {
     "soundscape":             "Sleep Soundscape",
 }
 
+
 def _slug(title: str) -> str:
     return "episode-" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
 
 
 def _save_stub_and_update_hubs(episode_meta: dict) -> str:
-    """Save episode stub to DB and update hub pages. Returns status string.
-
-    Klaviyo campaigns are deliberately NOT created here — they're created by
-    the #beezy-new-episodes watcher (agents/klaviyo_deployer.deploy_episode)
-    once Boris uploads the audio and the Buzzsprout URL is available.
-    """
+    """Save episode stub to DB and update hub pages. Returns status string."""
     status_parts = []
 
     try:
@@ -71,11 +61,11 @@ def _save_stub_and_update_hubs(episode_meta: dict) -> str:
                 )
             )
             conn.commit()
-        print(f"[sleep_audio] Episode stub saved to DB: {episode_meta.get('episode_id')}")
+        print(f"[sleep_audio] Episode stub saved: {episode_meta.get('episode_id')}")
         status_parts.append("db:ok")
     except Exception as exc:
         print(f"[sleep_audio] DB stub save failed (non-fatal): {exc}")
-        status_parts.append(f"db:error")
+        status_parts.append("db:error")
 
     try:
         from workers.hub_updater import add_episode_to_hubs
@@ -87,6 +77,51 @@ def _save_stub_and_update_hubs(episode_meta: dict) -> str:
         status_parts.append("hubs:error")
 
     return "pending_audio | " + " ".join(status_parts)
+
+
+def _run_tts_thread(
+    episode_id: str, title: str, script_text: str, episode_type: str,
+    duration_minutes: int, description_short: str,
+    shopify_page_url: str, suggested_send_date: str,
+) -> None:
+    """Background thread: runs the full TTS pipeline, posts to #beezy-new-episodes on success."""
+    try:
+        from workers.tts_pipeline import run_tts_pipeline, _post_tts_error
+        run_tts_pipeline(
+            episode_id=episode_id,
+            title=title,
+            script_text=script_text,
+            episode_type=episode_type,
+            duration_minutes=duration_minutes,
+            description_short=description_short,
+            shopify_page_url=shopify_page_url,
+            suggested_send_date=suggested_send_date,
+        )
+    except Exception as exc:
+        print(f"[tts_thread] FAILED — {title!r}: {exc}")
+        try:
+            from workers.tts_pipeline import _post_tts_error
+            _post_tts_error(title=title, episode_id=episode_id, error=str(exc))
+        except Exception as slack_exc:
+            print(f"[tts_thread] Could not post Slack error: {slack_exc}")
+
+
+def _start_tts(
+    *, episode_id: str, title: str, script_text: str, episode_type: str,
+    duration_minutes: int, description_short: str,
+    shopify_page_url: str, suggested_send_date: str,
+) -> None:
+    """Start the TTS pipeline in a daemon thread. Returns immediately."""
+    t = threading.Thread(
+        target=_run_tts_thread,
+        args=(episode_id, title, script_text, episode_type,
+              duration_minutes, description_short,
+              shopify_page_url, suggested_send_date),
+        daemon=True,
+        name=f"tts-{episode_id[:8]}",
+    )
+    t.start()
+    print(f"[sleep_audio] TTS thread started — {t.name}")
 
 
 def run_sleep_audio_slot(slot: dict) -> str:
@@ -132,7 +167,6 @@ def run_sleep_audio_slot(slot: dict) -> str:
             "description_short": description_short,
         })
         print(f"[sleep_audio] Image prompt: {image_prompt!r}")
-        print(f"[sleep_audio] Negative prompt: {_NEGATIVE_PROMPT!r}")
         cover_url = generate_cover(image_prompt, negative_prompt=_NEGATIVE_PROMPT).url
         print(f"[sleep_audio] Cover generated: {cover_url[:70]}...")
     except Exception as exc:
@@ -174,12 +208,13 @@ def run_sleep_audio_slot(slot: dict) -> str:
         page_url = result["url"]
         print(f"[sleep_audio] Page: {page_url}")
     except Exception as exc:
-        print(f"[sleep_audio] Page creation failed (non-fatal): {exc}")
+        exc_str = str(exc)
+        if "TAKEN" in exc_str or "already been taken" in exc_str.lower():
+            print(f"[sleep_audio] Page already exists at {page_url} — reusing")
+        else:
+            print(f"[sleep_audio] Page creation failed (non-fatal): {exc}")
 
     # ── 5. Save episode stub to DB + update hub pages ────────────────────────
-    # Klaviyo campaigns are created ONLY by the #beezy-new-episodes watcher,
-    # after Boris uploads the audio to Buzzsprout. Calling deploy_episode() here
-    # would create duplicate campaigns (one with no audio URL, one with).
     episode_id   = f"ep_cal_{slot_date.replace('-', '')}_{uuid.uuid4().hex[:6]}"
     episode_meta = {
         "episode_id":          episode_id,
@@ -193,249 +228,36 @@ def run_sleep_audio_slot(slot: dict) -> str:
     }
     deploy_result = _save_stub_and_update_hubs(episode_meta)
 
-    # ── 6. Dispatch TTS ───────────────────────────────────────────────────────
+    # ── 6. TTS in background thread ───────────────────────────────────────────
+    # Completes asynchronously: ElevenLabs → ffmpeg → Buzzsprout → #beezy-new-episodes
+    # Slack watcher then auto-creates two Klaviyo campaigns and posts ✅ to #beezy-agents.
     label = _EPISODE_LABELS.get(episode_type, "Sleep Audio")
-    if _SAP_URL:
-        dispatched, tts_run_id = _dispatch_to_tts(
-            episode_id=episode_id, title=title, script=script,
-            episode_type=episode_type, duration=duration,
-            profile="sleep_story_philosophical",
-            slot_date=slot_date, page_url=page_url,
-            description_short=description_short,
-        )
-        if dispatched:
-            _store_pending_tts_run(episode_id=episode_id, run_id=tts_run_id, title=title)
-            _post_slack_auto_dispatch(
-                title=title, label=label, duration=duration,
-                slot_date=slot_date, page_url=page_url,
-                deploy_result=deploy_result, cover_url=cdn_url,
-                run_id=tts_run_id,
-            )
-            return f"deployed:{episode_id}"
-        # SAP returned non-202 — post error and fall through to manual handoff
-        _post_slack_error(title=title, label=label, run_id=tts_run_id, episode_id=episode_id)
+    eta_min = max(5, duration // 2)
 
-    _post_slack_handoff(
-        title=title, label=label, duration=duration, slot_date=slot_date,
-        page_url=page_url, deploy_result=deploy_result,
-        script=script, cover_url=cdn_url, run_id=skill_result.run_id,
+    _start_tts(
+        episode_id=episode_id,
+        title=title,
+        script_text=script,
+        episode_type=episode_type,
+        duration_minutes=duration,
+        description_short=description_short,
+        shopify_page_url=page_url,
+        suggested_send_date=slot_date,
+    )
+
+    post_draft(
+        title=f"🎙 Sleep Audio — {title}",
+        summary_lines=[
+            f"*Title:* {title}",
+            f"*Type:* {label}  ·  {duration} min",
+            f"*Send date:* {slot_date}",
+            f"*Page:* {page_url}",
+            f"*Episode ID:* `{episode_id}`",
+            f"*ETA:* ~{eta_min}–{eta_min * 3} min — TTS running locally, campaigns auto-created when audio is ready",
+        ],
+        body="TTS pipeline is running. No action needed — campaigns and episode update post here when complete.",
+        image_url=cdn_url or None,
+        image_alt=title,
     )
 
     return f"deployed:{episode_id}"
-
-
-def _dispatch_to_tts(
-    *, episode_id: str, title: str, script: str, episode_type: str,
-    duration: int, profile: str, slot_date: str, page_url: str,
-    description_short: str,
-) -> tuple[bool, str]:
-    """POST script to the sleep-audio-platform cloud API.
-    Returns (accepted, run_id). run_id is '' on failure.
-    """
-    payload = {
-        "episode_id":          episode_id,
-        "title":               title,
-        "topic":               title,
-        "script_text":         script,
-        "episode_type":        episode_type,
-        "duration_minutes":    duration,
-        "profile":             profile,
-        "suggested_send_date": slot_date,
-        "shopify_page_url":    page_url,
-        "description_short":   description_short,
-    }
-    headers = {"Content-Type": "application/json"}
-    if _SAP_KEY:
-        headers["X-API-Key"] = _SAP_KEY
-    try:
-        resp = httpx.post(
-            f"{_SAP_URL}/api/v1/generate",
-            json=payload,
-            headers=headers,
-            timeout=15,
-            verify=False,   # Replit CA bundle doesn't include all intermediate certs
-        )
-        if resp.status_code == 202:
-            run_id = resp.json().get("run_id", "")
-            print(f"[sleep_audio] TTS dispatched to sleep-audio-platform — run_id: {run_id}")
-            return True, run_id
-        print(f"[sleep_audio] sleep-audio-platform returned {resp.status_code}: {resp.text[:200]}")
-        return False, ""
-    except Exception as exc:
-        print(f"[sleep_audio] TTS dispatch failed (falling back to Slack handoff): {exc}")
-        return False, ""
-
-
-def _store_pending_tts_run(*, episode_id: str, run_id: str, title: str) -> None:
-    """Append a pending TTS run to agent_state for the 30-min watchdog."""
-    try:
-        from db.connection import get_conn
-        with get_conn() as conn:
-            row = conn.execute(
-                "SELECT value FROM agent_state WHERE key='pending_tts_runs'"
-            ).fetchone()
-            runs = json.loads(row[0]) if row else []
-            runs.append({
-                "episode_id":    episode_id,
-                "run_id":        run_id,
-                "title":         title,
-                "dispatched_at": datetime.now(timezone.utc).isoformat(),
-            })
-            conn.execute(
-                "INSERT INTO agent_state (key, value, updated_at) VALUES ('pending_tts_runs', %s, NOW()) "
-                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
-                (json.dumps(runs),),
-            )
-            conn.commit()
-    except Exception as exc:
-        print(f"[sleep_audio] Failed to store pending TTS run (non-fatal): {exc}")
-
-
-def check_tts_timeouts() -> None:
-    """Called every 5 min by cron. Alerts #beezy-agents if a TTS run has been
-    pending > 30 minutes without a Buzzsprout URL appearing in the episodes table.
-    """
-    try:
-        from db.connection import get_conn
-        with get_conn() as conn:
-            row = conn.execute(
-                "SELECT value FROM agent_state WHERE key='pending_tts_runs'"
-            ).fetchone()
-        if not row:
-            return
-        runs: list[dict] = json.loads(row[0])
-    except Exception:
-        return
-
-    if not runs:
-        return
-
-    now = datetime.now(timezone.utc)
-    still_pending: list[dict] = []
-
-    for run in runs:
-        try:
-            dispatched_at = datetime.fromisoformat(run["dispatched_at"])
-        except (KeyError, ValueError):
-            continue
-        age_minutes = (now - dispatched_at).total_seconds() / 60
-
-        if age_minutes < 30:
-            still_pending.append(run)
-            continue
-
-        # Check whether the episode has a Buzzsprout URL yet
-        try:
-            from db.connection import get_conn
-            with get_conn() as conn:
-                ep = conn.execute(
-                    "SELECT buzzsprout_url FROM episodes WHERE episode_id = %s",
-                    (run["episode_id"],),
-                ).fetchone()
-        except Exception:
-            still_pending.append(run)
-            continue
-
-        if ep and ep[0]:
-            # Completed — drop from watchlist
-            print(f"[sleep_audio] TTS run {run['run_id'][:8]}… completed (Buzzsprout URL in DB)")
-            continue
-
-        # Still no audio after 30 min — alert Boris
-        run_id  = run.get("run_id", "unknown")
-        title   = run.get("title", "unknown")
-        print(f"[sleep_audio] TTS timeout alert — run_id: {run_id}")
-        post_draft(
-            title=f"⚠️ TTS timeout — {title}",
-            summary_lines=[
-                f"*Episode:* {title}",
-                f"*Run ID:* `{run_id}`",
-                f"*Dispatched:* {run['dispatched_at'][:19].replace('T', ' ')} UTC",
-                f"*Age:* {int(age_minutes)} min — no Buzzsprout URL yet",
-                "Check sleep-audio-platform logs for this run_id.",
-            ],
-            body="",
-        )
-        # Drop from list — alert sent once, don't spam
-        # (if genuinely stuck Boris can redeploy manually)
-
-    # Persist updated watchlist
-    try:
-        from db.connection import get_conn
-        with get_conn() as conn:
-            conn.execute(
-                "INSERT INTO agent_state (key, value, updated_at) VALUES ('pending_tts_runs', %s, NOW()) "
-                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
-                (json.dumps(still_pending),),
-            )
-            conn.commit()
-    except Exception as exc:
-        print(f"[sleep_audio] Failed to update pending_tts_runs: {exc}")
-
-
-def _post_slack_auto_dispatch(
-    *, title: str, label: str, duration: int, slot_date: str,
-    page_url: str, deploy_result: str, cover_url: str, run_id: str,
-) -> None:
-    """Slack notification when TTS is accepted by sleep-audio-platform."""
-    eta_min = max(5, duration // 2)
-    summary_lines = [
-        f"*Title:* {title}",
-        f"*Type:* {label}  ·  {duration} min",
-        f"*Send date:* {slot_date}",
-        f"*Page:* {page_url}",
-        f"*TTS run ID:* `{run_id}`",
-        f"*ETA:* ~{eta_min}–{eta_min * 3} min — campaigns auto-created on Buzzsprout upload",
-    ]
-    post_draft(
-        title=f"🎙 Sleep Audio Dispatched — {title}",
-        summary_lines=summary_lines,
-        body="TTS pipeline running in the cloud. No action needed — campaigns post here when audio is ready.",
-        image_url=cover_url or None,
-        image_alt=title,
-    )
-
-
-def _post_slack_error(*, title: str, label: str, run_id: str, episode_id: str) -> None:
-    """Slack alert when sleep-audio-platform returns non-202 or is unreachable."""
-    post_draft(
-        title=f"❌ TTS dispatch failed — {title}",
-        summary_lines=[
-            f"*Episode:* {title}",
-            f"*Type:* {label}",
-            f"*Episode ID:* `{episode_id}`",
-            f"*Run ID:* `{run_id or 'n/a'}`",
-            "sleep-audio-platform returned a non-202 response or is unreachable.",
-            "Script has been posted below for manual TTS — see handoff message.",
-        ],
-        body="",
-    )
-
-
-def _post_slack_handoff(*, title: str, label: str, duration: int, slot_date: str,
-                        page_url: str, deploy_result: str, script: str,
-                        cover_url: str, run_id: str) -> None:
-    summary_lines = [
-        f"*Title:* {title}",
-        f"*Type:* {label}  ·  {duration} min",
-        f"*Send date:* {slot_date}",
-        f"*Page:* {page_url}",
-        f"*Campaigns:* Created automatically after you upload audio to Buzzsprout",
-    ]
-    body = (
-        "*Next step — Boris:*\n"
-        "1. Copy the script below into your *sleep-audio-platform* Claude chat\n"
-        "2. It produces TTS (ElevenLabs) → uploads to Buzzsprout automatically\n"
-        "3. sleep-audio-platform posts metadata to *#beezy-new-episodes* when done\n"
-        "4. This system picks it up and updates the episode page with the audio player\n\n"
-        f"_Script also stored in `runs` table — run ID: `{run_id}`_\n\n"
-        "─────────────────── SCRIPT ───────────────────\n\n"
-        + script
-    )
-    post_draft(
-        title=f"Sleep Audio Ready — {title}",
-        summary_lines=summary_lines,
-        body=body,
-        image_url=cover_url or None,
-        image_alt=title,
-    )
