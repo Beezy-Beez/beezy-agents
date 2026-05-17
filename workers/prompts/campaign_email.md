@@ -73,5 +73,5 @@ Return ONLY valid JSON. No markdown fences, no commentary.
   "from_label":       "Alan from Beezy Beez",
   "body_paragraphs":  ["para 1", "para 2", "para 3"],
   "cta_text":         "SHOP NOW",
-  "image_prompt":     "exactly 15 words including woman 50+"
+  "image_prompt":     "exactly 15 words including white woman 50+"
 }

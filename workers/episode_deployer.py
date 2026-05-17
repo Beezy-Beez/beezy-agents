@@ -64,13 +64,16 @@ _EPISODE_LABELS = {
     "soundscape":             "Sleep Soundscape",
 }
 
-# episode_type → hub handles to update (matches hub_updater._EPISODE_HUBS)
+# episode_type → hub handles to update (must mirror hub_updater._EPISODE_HUBS exactly)
+# sleep-science-hub: audio content only (sleep_story, soundscape)
+# meditation-library: guided + affirmation meditation
+# morning-wellness-hub: morning meditation
 _HUB_MAP: dict[str, list[str]] = {
     "sleep_story":            ["sleep-science-hub"],
     "soundscape":             ["sleep-science-hub"],
-    "guided_meditation":      ["sleep-science-hub", "meditation-library"],
-    "affirmation_meditation": ["sleep-science-hub", "meditation-library"],
-    "morning_meditation":     ["sleep-science-hub", "meditation-library", "morning-wellness-hub"],
+    "guided_meditation":      ["meditation-library"],
+    "affirmation_meditation": ["meditation-library"],
+    "morning_meditation":     ["morning-wellness-hub"],
 }
 
 # page_type hint for index_updater per episode_type
@@ -156,7 +159,7 @@ _EPIS_FONTS = (
     '<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Lato:wght@400;700&display=swap" rel="stylesheet">'
 )
 
-_EPIS_NEWSLETTER_FORM = """<div class="epis-newsletter">
+_EPIS_NEWSLETTER_FORM = """<div class="epis-newsletter"{extra_style}>
 <h3>Get The Hive Mind in Your Inbox</h3>
 <p>One sleep science deep-dive every three days. No products pushed — just the research and what it means for your nights.</p>
 <form class="epis-newsletter-form" method="post" action="https://manage.kmail-lists.com/ajax/subscriptions/subscribe">
@@ -215,6 +218,14 @@ _BACK_CONFIG: dict[str, tuple[str, str]] = {
     "morning_meditation":     ("the Meditation Library", f"{_SHOPIFY_DOMAIN}/pages/meditation-library"),
 }
 
+_ABOUT_LABEL: dict[str, str] = {
+    "sleep_story":            "sleep story",
+    "soundscape":             "soundscape",
+    "guided_meditation":      "meditation",
+    "affirmation_meditation": "meditation",
+    "morning_meditation":     "meditation",
+}
+
 _TRANSCRIPT_META: dict[str, str] = {
     "sleep_story":            "Full transcript of this sleep story, lightly edited for readability.",
     "soundscape":             "Notes on this soundscape.",
@@ -250,6 +261,7 @@ def _build_page_html(meta: dict[str, Any], page_url: str = "") -> str:
         ("the Sleep Science Hub", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub"),
     )
     transcript_meta = _TRANSCRIPT_META.get(episode_type, "Full transcript, lightly edited for readability.")
+    about_label = _ABOUT_LABEL.get(episode_type, label.lower())
 
     # Buzzsprout embed URL — add small_player params if missing
     if embed_raw and "client_source=small_player" not in embed_raw:
@@ -328,18 +340,12 @@ def _build_page_html(meta: dict[str, Any], page_url: str = "") -> str:
         f' <span class="sep">›</span> '
         f'<a href="{hub_url}">{hub_label}</a>'
         f' <span class="sep">›</span> {crumb_label}</nav>',
-        # Hero
+        # Hero — text only, no cover image (cover image is for emails/hub cards only)
         f'<div class="epis-hero" role="banner">'
         f'<p class="epis-eyebrow">{eyebrow}</p>'
         f'<h1 class="epis-h1">{title}</h1>'
         f'<p class="epis-dek">{desc_short}</p>'
-        + (
-            f'<img src="{cover_image}" alt="{title}" '
-            f'style="width:100%;max-width:700px;height:auto;border-radius:8px;'
-            f'margin:20px auto 0;display:block;">'
-            if cover_image else ""
-        )
-        + f'</div>',
+        f'</div>',
         # Audio player
         f'<section class="epis-audio"><p class="epis-audio-label">Listen</p>'
         + (
@@ -354,10 +360,10 @@ def _build_page_html(meta: dict[str, Any], page_url: str = "") -> str:
           f'<a href="https://open.spotify.com/show/45Y1QPOOMiAhAWjAREkTkZ" target="_blank" rel="noopener">Spotify</a>.</p>'
           f'</section>',
         # About section
-        f'<section class="epis-section"><h2 class="epis-h2">About this {label.lower()}</h2>'
+        f'<section class="epis-section"><h2 class="epis-h2">About this {about_label}</h2>'
         f'{about_html}</section>',
         # Newsletter top
-        _EPIS_NEWSLETTER_FORM.format(source="meditation-page-top"),
+        _EPIS_NEWSLETTER_FORM.format(source="meditation-page-top", extra_style=""),
         # Transcript
         f'<section class="epis-transcript" aria-labelledby="epis-transcript-h">'
         f'<h2 id="epis-transcript-h" class="epis-h2">Transcript</h2>'
@@ -373,7 +379,7 @@ def _build_page_html(meta: dict[str, Any], page_url: str = "") -> str:
         # Product CTA
         _EPIS_PRODUCT_CTA,
         # Newsletter bottom
-        _EPIS_NEWSLETTER_FORM.format(source="meditation-page-bottom"),
+        _EPIS_NEWSLETTER_FORM.format(source="meditation-page-bottom", extra_style=' style="margin-top:48px;"'),
         # Archive link
         _EPIS_ARCHIVE_LINK,
         # Back link

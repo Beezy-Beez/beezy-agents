@@ -60,4 +60,4 @@ You receive a JSON object with:
 
 Return ONLY valid JSON. No markdown fences, no commentary.
 
-{"diagnosis":"one sentence on why this flow is underperforming","fix_strategy":"one sentence on the approach","subject":"new subject line","preview_text":"under 90 chars","from_label":"Alan from Beezy Beez","body_paragraphs":["para 1","para 2","para 3"],"cta_text":"SHOP NOW","image_prompt":"exactly 15 words including woman 50+"}
+{"diagnosis":"one sentence on why this flow is underperforming","fix_strategy":"one sentence on the approach","subject":"new subject line","preview_text":"under 90 chars","from_label":"Alan from Beezy Beez","body_paragraphs":["para 1","para 2","para 3"],"cta_text":"SHOP NOW","image_prompt":"exactly 15 words including white woman 50+"}

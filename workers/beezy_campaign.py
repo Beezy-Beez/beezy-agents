@@ -291,7 +291,7 @@ Output ONLY valid JSON:
   "from_label": "Alan from Beezy Beez",
   "body_paragraphs": ["para 1", "para 2", "para 3"],
   "cta_text": "SHOP NOW",
-  "image_prompt": "15-word prompt with human woman 50+"
+  "image_prompt": "15-word prompt with white woman 50+"
 }"""
 
 

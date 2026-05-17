@@ -480,7 +480,7 @@ def _check_image_prompt(copy: dict) -> dict:
     has_human = any(s in prompt for s in human_signals)
     if not has_human:
         return {"rule": "C4", "name": "Image includes humans", "pass": False,
-                "detail": f"Image prompt has no human: '{prompt[:60]}'. Must include woman 50+."}
+                "detail": f"Image prompt has no human: '{prompt[:60]}'. Must include white woman 50+."}
     return {"rule": "C4", "name": "Image includes humans", "pass": True,
             "detail": "Image prompt includes human subject"}
 
