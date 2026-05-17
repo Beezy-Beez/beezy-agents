@@ -22,8 +22,21 @@ import re
 from typing import Any
 
 
+HM_PAGE_CSS = (
+    "<style>"
+    ".hm-page{font-family:Georgia,'Times New Roman',serif;color:#2c2417}"
+    # Prevent theme rule (strong,h1,h2,...{font-weight:700}) from bleeding into paragraphs
+    ".hm-page p{font-weight:400!important}"
+    # Title div replaces <h1> to avoid Shopify theme h1 cascade
+    ".hm-h1{font-size:32px;font-weight:600;color:#2c2417;margin:0 0 12px 0;"
+    "line-height:1.25;font-family:Georgia,serif;display:block}"
+    # Keep h2 at editorial weight, not theme's 700
+    ".hm-page h2{font-weight:600!important;font-family:Georgia,serif!important}"
+    "</style>"
+)
+
 STYLES = {
-    "outer":            "max-width:700px; margin:0 auto; padding:40px 20px; font-family:Georgia, 'Times New Roman', serif; color:#2c2417;",
+    "outer":            "max-width:700px; margin:0 auto; padding:40px 20px;",
     "breadcrumb":       "font-size:16px; color:#8b7355; margin:0 0 30px 0;",
     "breadcrumb_link":  "color:#8b7355; text-decoration:none;",
     "meta":             "font-size:16px; color:#8b7355; margin:0 0 10px 0;",
@@ -259,7 +272,8 @@ def build_page_html(issue: dict[str, Any]) -> str:
     teaser_html = _inline_format(teaser)
 
     parts: list[str] = []
-    parts.append(f'<div style="{STYLES["outer"]}">')
+    parts.append(HM_PAGE_CSS)
+    parts.append(f'<div class="hm-page" style="{STYLES["outer"]}">')
 
     # Breadcrumb
     parts.append(
@@ -277,9 +291,9 @@ def build_page_html(issue: dict[str, Any]) -> str:
         f'</p>'
     )
 
-    # Use div instead of h1 to avoid Shopify theme CSS overriding inline styles and
-    # cascading bold/large rendering into body paragraphs.
-    parts.append(f'<div role="heading" aria-level="1" style="{STYLES["h1"]}">{page_title}</div>')
+    # Use .hm-h1 div (not <h1>) — Shopify theme rule `strong,h1,...{font-weight:700;width:100%}`
+    # overrides inline h1 styles and bleeds into adjacent paragraphs.
+    parts.append(f'<div class="hm-h1" role="heading" aria-level="1">{page_title}</div>')
 
     # Dek
     parts.append(f'<p style="{STYLES["dek"]}">{page_dek}</p>')
