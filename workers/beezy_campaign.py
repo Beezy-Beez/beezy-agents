@@ -853,6 +853,10 @@ def run(slot: dict) -> dict:
         ab_subject = _generate_ab_subject(slot, copy.get("subject", ""))
         print("[beezy_campaign]   Subject B (benefit):  " + ab_subject)
 
+    # Build image prompt before validator so C4 ("Image includes humans") can check it
+    copy["image_prompt"] = _build_image_prompt(slot, copy)
+    print("[beezy_campaign]   Image prompt: " + copy["image_prompt"])
+
     # ── VALIDATOR GATE ──────────────────────────────────────────────────
     from db.connection import get_conn as _get_validator_conn
     print("[beezy_campaign] Running validator...")
@@ -883,10 +887,9 @@ def run(slot: dict) -> dict:
         body="",
     )
 
-    # Image
-    prompt = _build_image_prompt(slot, copy)
+    # Image (prompt already built above for validator C4 check)
+    prompt = copy["image_prompt"]
     print("[beezy_campaign] Generating image...")
-    print(f"[beezy_campaign] Image prompt: {prompt!r}")
     print(f"[beezy_campaign] Negative prompt: {_CAMPAIGN_NEGATIVE_PROMPT!r}")
     raw_url = _generate_image(prompt, negative_prompt=_CAMPAIGN_NEGATIVE_PROMPT)
     cdn_url = _upload_to_shopify_cdn(raw_url, "Beezy Beez email")
@@ -901,9 +904,11 @@ def run(slot: dict) -> dict:
     template_id = _create_template(html, tpl_name)
 
     print("[beezy_campaign] Creating Klaviyo campaign...")
+    slot_exclusions = slot.get("excluded_segment_ids") or []
+    all_exclusions = ([excluded_list_id] if excluded_list_id else []) + list(slot_exclusions)
     campaign_id, message_id = _create_campaign(
         slot, copy, segment_id,
-        excluded_ids=[excluded_list_id] if excluded_list_id else None,
+        excluded_ids=all_exclusions or None,
     )
 
     if message_id:
