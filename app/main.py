@@ -216,6 +216,14 @@ def _run_cron_jobs(now: datetime) -> None:
         except Exception as e:
             print(f"[cron] hive mind error: {e}")
 
+    if h == 9 and m == 45:
+        try:
+            from workers.calendar_campaign_builder import run as run_calendar_builder
+            print("[cron] calendar campaign builder")
+            run_calendar_builder()
+        except Exception as e:
+            print(f"[cron] calendar campaign builder error: {e}")
+
     if h == 10 and m == 30:
         try:
             from workers.deliverability_monitor import run_deliverability_check
