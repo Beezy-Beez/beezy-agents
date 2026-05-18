@@ -196,10 +196,64 @@ def deploy_episode(metadata: dict, conn=None) -> str:
     """
     from lib.email_builder_episode import build_episode_emails
 
-    title        = metadata.get("title", "")
-    episode_type = metadata.get("episode_type", "sleep_story")
-    page_url     = metadata.get("shopify_page_url") or metadata.get("buzzsprout_url", "")
-    from_email   = os.environ.get("KLAVIYO_FROM_EMAIL", "help@trybeezybeez.com")
+    title          = metadata.get("title", "")
+    episode_type   = metadata.get("episode_type", "sleep_story")
+    buzzsprout_url = metadata.get("buzzsprout_url", "")
+    from_email     = os.environ.get("KLAVIYO_FROM_EMAIL", "help@trybeezybeez.com")
+
+    # Block: Buzzsprout URL must be confirmed before creating campaigns.
+    # The Shopify page CTA points to the episode page, which must have a working
+    # audio embed before we drive traffic to it via email.
+    if not buzzsprout_url:
+        msg = f"[deployer] BLOCKED — no buzzsprout_url for '{title}'. Upload audio to Buzzsprout first."
+        print(msg)
+        return msg
+
+    # Enrich cover_image_url from DB if the Slack metadata payload didn't include it.
+    # sleep_audio_producer generates the image in phase 1 and stores it in episodes;
+    # sleep-audio-platform's Slack post only contains what it was given at dispatch time.
+    metadata = dict(metadata)
+    if not metadata.get("cover_image_url"):
+        ep_id = metadata.get("episode_id", "")
+        if ep_id:
+            try:
+                from db.connection import get_conn
+                with get_conn() as _c:
+                    row = _c.execute(
+                        "SELECT cover_image_url FROM episodes WHERE episode_id = %s", (ep_id,)
+                    ).fetchone()
+                if row and row[0]:
+                    metadata["cover_image_url"] = row[0]
+                    print(f"[deployer] cover_image_url enriched from DB: {row[0][:70]}")
+            except Exception as exc:
+                print(f"[deployer] DB cover_image lookup failed (non-fatal): {exc}")
+
+    # Generate and upload a cover image if still missing.
+    if not metadata.get("cover_image_url"):
+        try:
+            from workers.image_gen import generate_cover
+            from workers.episode_deployer import _episode_image_prompt, _NEGATIVE_PROMPT
+            prompt = _episode_image_prompt({
+                "episode_type": episode_type,
+                "title": title,
+                "description_short": metadata.get("description_short", ""),
+            })
+            cover_url = generate_cover(prompt, negative_prompt=_NEGATIVE_PROMPT).url
+            from workers.shopify_publisher import upload_image_to_shopify
+            cdn_url = upload_image_to_shopify(cover_url, alt=title).get("url", cover_url)
+            metadata["cover_image_url"] = cdn_url
+            print(f"[deployer] Cover image generated + uploaded: {cdn_url[:70]}")
+        except Exception as exc:
+            print(f"[deployer] Image generation failed (non-fatal): {exc}")
+
+    page_url = metadata.get("shopify_page_url") or buzzsprout_url
+
+    # Update the Shopify episode page with the real audio embed BEFORE building
+    # email HTML — the CTA drives recipients to this page, so audio must be live first.
+    try:
+        _update_episode_page_audio(title, buzzsprout_url, episode_type)
+    except Exception as exc:
+        print(f"[deployer] Page audio update failed (non-fatal): {exc}")
 
     email_a_html, email_b_html = build_episode_emails(metadata, page_url)
 
@@ -287,19 +341,27 @@ def deploy_episode(metadata: dict, conn=None) -> str:
     except Exception as exc:
         print("[deployer] Hub update failed (non-fatal): " + str(exc))
 
-    # Inject audio embed into the existing Shopify episode page
-    buzzsprout_url = metadata.get("buzzsprout_url", "")
+    # Page audio embed is updated at the top of deploy_episode (before email build).
+    # This second call is a no-op guard — skipped when embed_src already present.
     if buzzsprout_url:
         try:
-            _update_episode_page_audio(title, buzzsprout_url)
+            _update_episode_page_audio(title, buzzsprout_url, episode_type)
         except Exception as exc:
             print("[deployer] Page audio update failed (non-fatal): " + str(exc))
 
     return "Email A: " + camp_a_url + "\nEmail B: " + camp_b_url
 
 
-def _update_episode_page_audio(title: str, buzzsprout_url: str) -> None:
-    """Find the Shopify episode page by handle and replace the audio placeholder with the real embed."""
+_STORY_TYPES = {"sleep_story", "soundscape"}
+
+
+def _update_episode_page_audio(title: str, buzzsprout_url: str, episode_type: str = "sleep_story") -> None:
+    """Find the Shopify episode page by handle and replace the audio placeholder with the real embed.
+
+    Uses small_player for meditations (matches _page_html_meditation's iframe format).
+    Uses large_player for sleep stories / soundscapes (matches _page_html_story format).
+    Matches both placeholder variants written by the two page builders.
+    """
     import re as _re
     from lib.shopify_admin import graphql
     from workers.shopify_publisher import update_page
@@ -318,44 +380,51 @@ def _update_episode_page_audio(title: str, buzzsprout_url: str) -> None:
         print(f"[deployer] Page not found for handle: {handle}")
         return
 
-    node     = edges[0]["node"]
-    page_id  = node["id"]
+    node      = edges[0]["node"]
+    page_id   = node["id"]
     body_html = node.get("body") or ""
 
-    # Build the embed iframe.
-    # buzzsprout_url may be the MP3 download URL:
-    #   https://www.buzzsprout.com/2292260/episodes/19196112-slug.mp3
-    # Buzzsprout's iframe player requires the short form:
-    #   https://www.buzzsprout.com/2292260/19196112
+    # Build embed src — episode MP3 URLs contain the episode ID.
+    # https://www.buzzsprout.com/2292260/episodes/19196112-slug.mp3
+    # → player: https://www.buzzsprout.com/2292260/19196112?client_source=<player>&iframe=true
     m = _re.search(r"buzzsprout\.com/(\d+)/episodes/(\d+)", buzzsprout_url)
     if m:
-        embed_src = f"https://www.buzzsprout.com/{m.group(1)}/{m.group(2)}?client_source=large_player&iframe=true"
+        base = f"https://www.buzzsprout.com/{m.group(1)}/{m.group(2)}"
     else:
-        sep = "&" if "?" in buzzsprout_url else "?"
-        embed_src = f"{buzzsprout_url}{sep}client_source=large_player&iframe=true"
-    iframe = (
-        f'<iframe src="{embed_src}" loading="lazy" frameborder="0" '
-        f'scrolling="no" title="Beezy Beez Sleep Story: {title}"></iframe>'
-    )
+        base = buzzsprout_url.split("?")[0]
 
-    placeholder = (
-        '<p style="font-size:16px;color:#6b5947;font-style:italic;">'
-        "Audio coming shortly — bookmark this page or return from your email link.</p>"
-    )
+    is_story  = episode_type in _STORY_TYPES
+    player    = "large_player" if is_story else "small_player"
+    embed_src = f"{base}?client_source={player}&iframe=true"
 
-    if placeholder in body_html:
-        new_body = body_html.replace(placeholder, iframe)
-    elif "Audio coming shortly" in body_html:
-        # Looser match in case of minor HTML variation
+    if is_story:
+        iframe = (
+            f'<iframe src="{embed_src}" loading="lazy" frameborder="0" '
+            f'scrolling="no" title="Beezy Beez Sleep Story: {title}"></iframe>'
+        )
+    else:
+        iframe = (
+            f'<iframe src="{embed_src}" loading="lazy" width="100%" height="200" '
+            f'frameborder="0" scrolling="no" '
+            f'title="Sleep Better Podcast - {_EPISODE_LABELS.get(episode_type, "Episode")} - {title}"></iframe>'
+        )
+
+    # Match either placeholder variant:
+    #   _page_html_story:      "Audio coming shortly — bookmark this page or return from your email link."
+    #   _page_html_meditation: "Audio coming soon — bookmark this page or return from your email link."
+    if _re.search(r'Audio coming s(?:hortly|oon)', body_html):
         new_body = _re.sub(
-            r'<p[^>]*>Audio coming shortly[^<]*</p>',
+            r'<p[^>]*>Audio coming s(?:hortly|oon)[^<]*</p>',
             iframe,
             body_html,
         )
+        print(f"[deployer] Replaced audio placeholder in epis-audio section")
+    elif embed_src in body_html:
+        print(f"[deployer] Audio embed already present — skipping")
+        return
     else:
-        # Embed not already present — append before closing body tag or end
         new_body = body_html + "\n" + iframe
-        print(f"[deployer] Placeholder not found — appending embed to page")
+        print(f"[deployer] Placeholder not found — appending embed to end of page")
 
     update_page(page_id, title=title, body_html=new_body)
     print(f"[deployer] Episode page updated with audio embed: /pages/{handle}")

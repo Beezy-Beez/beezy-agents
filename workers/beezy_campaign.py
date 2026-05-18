@@ -233,12 +233,22 @@ def _create_shopify_discount(slot: dict) -> str:
     resp = httpx.post(url, headers=hdrs, timeout=30,
                       json={"query": mutation, "variables": variables})
     resp.raise_for_status()
-    data   = resp.json().get("data", {}).get("discountCodeBasicCreate", {})
+    resp_json = resp.json()
+    # Shopify returns "data": null on ACCESS_DENIED or GraphQL errors — handle gracefully
+    raw_data = resp_json.get("data") or {}
+    data     = raw_data.get("discountCodeBasicCreate") or {}
+    if not data:
+        gql_errors = resp_json.get("errors", [])
+        print(f"[beezy_campaign] Discount API warning — data=null, errors={gql_errors[:2]}")
+        print(f"[beezy_campaign] Falling back to provided code: {code!r}")
+        return code
     errors = data.get("userErrors", [])
     if errors:
         print("[beezy_campaign] Discount warning: " + str(errors))
-    nodes = (data.get("codeDiscountNode", {}).get("codeDiscount", {})
-             .get("codes", {}).get("nodes", []))
+    nodes = (
+        ((data.get("codeDiscountNode") or {}).get("codeDiscount") or {})
+        .get("codes", {}).get("nodes", [])
+    )
     return nodes[0]["code"] if nodes else code
 
 

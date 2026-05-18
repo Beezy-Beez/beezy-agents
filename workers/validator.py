@@ -47,20 +47,29 @@ KILL_LIST = [
 
 # ── Individual rule checkers ───────────────────────────────────────────────────
 
+def _slot_date(slot: dict) -> date:
+    """Return the slot's scheduled date. Falls back to today if missing/invalid."""
+    raw = slot.get("date", "")
+    try:
+        return date.fromisoformat(raw) if raw else date.today()
+    except ValueError:
+        return date.today()
+
+
 def _r1_smart_sending(conn, slot: dict) -> dict:
     """R1: Hours since any prior touch ≥ 24."""
-    audience = slot.get("audience", "")
-    today = date.today()
-    yesterday = today - timedelta(days=1)
+    audience  = slot.get("audience", "")
+    sdate     = _slot_date(slot)
+    yesterday = sdate - timedelta(days=1)
     row = conn.execute(
         "SELECT MAX(slot_date) FROM calendar_executions "
         "WHERE audience = %s AND slot_date >= %s AND status IN ('dispatched','completed')",
         (audience, yesterday)
     ).fetchone()
     last_date = row[0] if row and row[0] else None
-    if last_date and last_date == today:
+    if last_date and last_date == sdate:
         return {"rule": "R1", "name": "Smart Sending (≥24h)", "pass": False,
-                "detail": f"Already sent to {audience} today ({today})"}
+                "detail": f"Already sent to {audience} on {sdate}"}
     return {"rule": "R1", "name": "Smart Sending (≥24h)", "pass": True,
             "detail": f"Last send: {last_date or 'none in last 24h'}"}
 
@@ -74,8 +83,8 @@ def _r2_audience_cooldown(conn, slot: dict) -> dict:
     """
     audience     = slot.get("audience", "")
     content_type = slot.get("content_type", "")
-    today          = date.today()
-    seven_days_ago = today - timedelta(days=7)
+    sdate          = _slot_date(slot)
+    seven_days_ago = sdate - timedelta(days=7)
 
     row = conn.execute(
         "SELECT slot_date, content_type FROM calendar_executions "
@@ -85,7 +94,7 @@ def _r2_audience_cooldown(conn, slot: dict) -> dict:
     ).fetchone()
 
     if row and row[0]:
-        days_since   = (today - row[0]).days
+        days_since   = (sdate - row[0]).days
         parent_type  = row[1] if len(row) > 1 else ""
 
         # Sniper exemption: the recent send IS the parent campaign we're following up on
@@ -108,9 +117,10 @@ def _r2_audience_cooldown(conn, slot: dict) -> dict:
 
 def _r3_theme_gap(conn, slot: dict) -> dict:
     """R3: Same theme gap (5d). If both shares theme, hours ≥ 120."""
-    content_type = slot.get("content_type", "")
-    audience = slot.get("audience", "")
-    five_days_ago = date.today() - timedelta(days=5)
+    content_type  = slot.get("content_type", "")
+    audience      = slot.get("audience", "")
+    sdate         = _slot_date(slot)
+    five_days_ago = sdate - timedelta(days=5)
     row = conn.execute(
         "SELECT slot_date FROM calendar_executions "
         "WHERE audience = %s AND content_type = %s AND slot_date > %s "
@@ -118,7 +128,7 @@ def _r3_theme_gap(conn, slot: dict) -> dict:
         (audience, content_type, five_days_ago)
     ).fetchone()
     if row and row[0]:
-        days_since = (date.today() - row[0]).days
+        days_since = (sdate - row[0]).days
         if days_since < 5:
             return {"rule": "R3", "name": "Theme 5d gap (≥120h)", "pass": False,
                     "detail": f"Same content_type '{content_type}' sent {days_since}d ago"}
@@ -132,7 +142,7 @@ def _r4_active_seal_weekly(conn, slot: dict) -> dict:
     if audience not in ("active_seal", "active_subscribers"):
         return {"rule": "R4", "name": "Active Seal weekly (<4)", "pass": True,
                 "detail": "N/A — not Active Seal"}
-    seven_days_ago = date.today() - timedelta(days=7)
+    seven_days_ago = _slot_date(slot) - timedelta(days=7)
     row = conn.execute(
         "SELECT COUNT(*) FROM calendar_executions "
         "WHERE audience IN ('active_seal','active_subscribers') AND slot_date > %s "
@@ -203,11 +213,11 @@ def _r7_format_kill_list(slot: dict) -> dict:
 
 def _r8_daily_cadence(conn, slot: dict) -> dict:
     """R8: ≤3 sends today (≤5 on push days)."""
-    today = date.today()
+    sdate = _slot_date(slot)
     row = conn.execute(
         "SELECT COUNT(*) FROM calendar_executions WHERE slot_date = %s "
         "AND status IN ('dispatched','completed')",
-        (today,)
+        (sdate,)
     ).fetchone()
     count = row[0] if row else 0
     passed = count < 3
@@ -244,13 +254,13 @@ _R11_OR_FLOOR  = 0.25
 
 
 def _r9_segment_overlap(conn, slot: dict) -> dict:
-    """R9: Same-day segment overlap — check if today's dispatched audiences share profiles."""
+    """R9: Same-day segment overlap — check if slot_date's dispatched audiences share profiles."""
     audience = (slot.get("audience") or "").lower().replace(" ", "_")
-    today = date.today()
+    sdate = _slot_date(slot)
     rows = conn.execute(
         "SELECT DISTINCT audience FROM calendar_executions "
         "WHERE slot_date = %s AND status IN ('dispatched','completed')",
-        (today,)
+        (sdate,)
     ).fetchall()
     dispatched = {(r[0] or "").lower().replace(" ", "_") for r in rows}
 
@@ -261,7 +271,7 @@ def _r9_segment_overlap(conn, slot: dict) -> dict:
                 return {
                     "rule": "R9", "name": "Segment overlap (same day)", "pass": False,
                     "detail": (
-                        f"'{audience}' overlaps with today's sends to "
+                        f"'{audience}' overlaps with {sdate} sends to "
                         f"{sorted(conflicts)}. Add exclusions in Klaviyo."
                     ),
                 }

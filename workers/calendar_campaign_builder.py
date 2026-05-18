@@ -375,6 +375,11 @@ def build_pending(conn, dry_run: bool = False, horizon_hours: int = 48) -> list[
         full_slot = _lookup_full_slot(conn, slot_date, audience, content_type, str(row[1]) if row[1] else None)
         if full_slot:
             slot = _enrich_slot(full_slot)
+            # CE row topic_angle overrides calendar when explicitly different (custom injection)
+            ce_topic = row[5]
+            if ce_topic and ce_topic != full_slot.get("topic_angle", ""):
+                slot["topic_angle"] = ce_topic
+                print(f"[builder] Topic override from CE row: {ce_topic[:60]}")
             print(f"[builder] Slot resolved from calendar: {label}")
         else:
             slot = _enrich_slot(_slot_from_ce_row(row))
