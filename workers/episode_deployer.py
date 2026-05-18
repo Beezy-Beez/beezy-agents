@@ -48,6 +48,23 @@ from config import DATABASE_URL
 from lib.slack import post_draft, notify_failure
 
 
+def _buzzsprout_embed_src(raw_url: str, player: str = "large") -> str:
+    """Convert any Buzzsprout URL to the iframe embed player URL.
+
+    Handles MP3 download URLs (https://www.buzzsprout.com/{pod}/{ep_id}-slug.mp3)
+    and already-correct player URLs. Returns empty string if raw_url is empty.
+    """
+    if not raw_url:
+        return ""
+    m = re.search(r"buzzsprout\.com/(\d+)/episodes/(\d+)", raw_url)
+    if m:
+        base = f"https://www.buzzsprout.com/{m.group(1)}/{m.group(2)}"
+    else:
+        base = raw_url.split("?")[0]
+    param = f"client_source={player}_player"
+    return f"{base}?{param}&iframe=true"
+
+
 # ── Audience IDs ──────────────────────────────────────────────────────────────
 
 _ENGAGED_CUSTOMERS = "RvtHdn"
@@ -178,12 +195,8 @@ def _page_html_story(meta: dict[str, Any], page_url: str = "") -> str:
     )
 
     # Audio embed or placeholder
-    if embed_raw:
-        sep = "&" if "?" in embed_raw else "?"
-        if "client_source=large_player" not in embed_raw:
-            embed_src = f"{embed_raw}{sep}client_source=large_player&iframe=true"
-        else:
-            embed_src = embed_raw
+    embed_src = _buzzsprout_embed_src(embed_raw, player="large")
+    if embed_src:
         audio_html = (
             f'      <iframe src="{embed_src}" loading="lazy" frameborder="0" '
             f'scrolling="no" title="Beezy Beez Sleep Story: {title}"></iframe>'
@@ -419,14 +432,7 @@ def _page_html_meditation(meta: dict[str, Any], page_url: str = "") -> str:
     about_label = _ABOUT_LABEL.get(episode_type, label.lower())
 
     # Buzzsprout embed — small_player params as on the live page
-    if embed_raw:
-        sep = "&" if "?" in embed_raw else "?"
-        if "client_source=small_player" not in embed_raw:
-            embed_src = f"{embed_raw}{sep}client_source=small_player&iframe=true"
-        else:
-            embed_src = embed_raw
-    else:
-        embed_src = ""
+    embed_src = _buzzsprout_embed_src(embed_raw, player="small")
 
     iframe_title = f"Sleep Better Podcast - {label} - {title}"
     _ep_match = re.search(r"/episodes/(\d+)", embed_raw)

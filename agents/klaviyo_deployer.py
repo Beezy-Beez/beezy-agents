@@ -238,8 +238,15 @@ def deploy_episode(metadata: dict, conn=None) -> str:
     )
 
     # Persist episode to DB for hub rebuild and historical record
-    _camp_a_id = camp_a_url.split("/")[-1] if camp_a_url else None
-    _camp_b_id = camp_b_url.split("/")[-1] if camp_b_url else None
+    # URL format: https://www.klaviyo.com/campaign/{ID}/wizard — take the segment before /wizard
+    def _extract_campaign_id(url: str) -> str | None:
+        if not url:
+            return None
+        parts = [p for p in url.rstrip("/").split("/") if p and p != "wizard"]
+        return parts[-1] if parts else None
+
+    _camp_a_id = _extract_campaign_id(camp_a_url)
+    _camp_b_id = _extract_campaign_id(camp_b_url)
     try:
         from db.connection import get_conn
         with get_conn() as _conn:
@@ -250,6 +257,7 @@ def deploy_episode(metadata: dict, conn=None) -> str:
                     klaviyo_campaign_id_a, klaviyo_campaign_id_b)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (episode_id) DO UPDATE SET
+                     buzzsprout_url        = EXCLUDED.buzzsprout_url,
                      klaviyo_campaign_id_a = EXCLUDED.klaviyo_campaign_id_a,
                      klaviyo_campaign_id_b = EXCLUDED.klaviyo_campaign_id_b,
                      deployed_at           = NOW()""",
@@ -279,7 +287,78 @@ def deploy_episode(metadata: dict, conn=None) -> str:
     except Exception as exc:
         print("[deployer] Hub update failed (non-fatal): " + str(exc))
 
+    # Inject audio embed into the existing Shopify episode page
+    buzzsprout_url = metadata.get("buzzsprout_url", "")
+    if buzzsprout_url:
+        try:
+            _update_episode_page_audio(title, buzzsprout_url)
+        except Exception as exc:
+            print("[deployer] Page audio update failed (non-fatal): " + str(exc))
+
     return "Email A: " + camp_a_url + "\nEmail B: " + camp_b_url
+
+
+def _update_episode_page_audio(title: str, buzzsprout_url: str) -> None:
+    """Find the Shopify episode page by handle and replace the audio placeholder with the real embed."""
+    import re as _re
+    from lib.shopify_admin import graphql
+    from workers.shopify_publisher import update_page
+
+    handle = "episode-" + _re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    query = """
+    query($q: String!) {
+      pages(first: 1, query: $q) {
+        edges { node { id title body } }
+      }
+    }
+    """
+    data = graphql(query, {"q": f"handle:{handle}"})
+    edges = (data.get("pages") or {}).get("edges") or []
+    if not edges:
+        print(f"[deployer] Page not found for handle: {handle}")
+        return
+
+    node     = edges[0]["node"]
+    page_id  = node["id"]
+    body_html = node.get("body") or ""
+
+    # Build the embed iframe.
+    # buzzsprout_url may be the MP3 download URL:
+    #   https://www.buzzsprout.com/2292260/episodes/19196112-slug.mp3
+    # Buzzsprout's iframe player requires the short form:
+    #   https://www.buzzsprout.com/2292260/19196112
+    m = _re.search(r"buzzsprout\.com/(\d+)/episodes/(\d+)", buzzsprout_url)
+    if m:
+        embed_src = f"https://www.buzzsprout.com/{m.group(1)}/{m.group(2)}?client_source=large_player&iframe=true"
+    else:
+        sep = "&" if "?" in buzzsprout_url else "?"
+        embed_src = f"{buzzsprout_url}{sep}client_source=large_player&iframe=true"
+    iframe = (
+        f'<iframe src="{embed_src}" loading="lazy" frameborder="0" '
+        f'scrolling="no" title="Beezy Beez Sleep Story: {title}"></iframe>'
+    )
+
+    placeholder = (
+        '<p style="font-size:16px;color:#6b5947;font-style:italic;">'
+        "Audio coming shortly — bookmark this page or return from your email link.</p>"
+    )
+
+    if placeholder in body_html:
+        new_body = body_html.replace(placeholder, iframe)
+    elif "Audio coming shortly" in body_html:
+        # Looser match in case of minor HTML variation
+        new_body = _re.sub(
+            r'<p[^>]*>Audio coming shortly[^<]*</p>',
+            iframe,
+            body_html,
+        )
+    else:
+        # Embed not already present — append before closing body tag or end
+        new_body = body_html + "\n" + iframe
+        print(f"[deployer] Placeholder not found — appending embed to page")
+
+    update_page(page_id, title=title, body_html=new_body)
+    print(f"[deployer] Episode page updated with audio embed: /pages/{handle}")
 
 
 def deploy_episode_from_slack(conn) -> str:

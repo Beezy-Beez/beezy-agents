@@ -80,11 +80,37 @@ _LAST_READ: dict[str, str] = {}
 
 
 def _get_last_read_ts(conn, channel: str) -> str:
-    return _LAST_READ.get(channel, str(time.time()))  # default: last 5 min
+    if channel in _LAST_READ:
+        return _LAST_READ[channel]
+    # Load from DB so restarts don't miss messages
+    try:
+        key = f"slack_last_read_{channel}"
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM agent_state WHERE key = %s", (key,))
+            row = cur.fetchone()
+        if row and row[0]:
+            _LAST_READ[channel] = row[0]
+            return row[0]
+    except Exception:
+        pass
+    # Default: 5 minutes ago (not "now" — that skips all recent messages)
+    return str(time.time() - 300)
 
 
 def _save_last_read_ts(conn, channel: str, ts: str) -> None:
     _LAST_READ[channel] = ts
+    # Persist to DB so restarts don't lose the cursor
+    try:
+        key = f"slack_last_read_{channel}"
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+                (key, ts),
+            )
+        conn.commit()
+    except Exception as exc:
+        print(f"[slack_agent] cursor persist failed ({channel}): {exc}")
 
 
 # ── Command interpreter ───────────────────────────────────────────────────────
