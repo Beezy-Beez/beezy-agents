@@ -320,15 +320,15 @@ def _post_slot_result(
     )
 
 
-def build_pending(conn, dry_run: bool = False) -> list[dict]:
+def build_pending(conn, dry_run: bool = False, horizon_hours: int = 48) -> list[dict]:
     """
-    Process all status='approved' rows within the 48h window.
+    Process all status='approved' rows within the horizon window.
 
     Returns a list of result dicts:
       {slot, result, status}   where status ∈ dispatched|failed|blocked
     """
     today = date.today()
-    cutoff = today + timedelta(hours=48)
+    cutoff = today + timedelta(hours=horizon_hours)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -488,6 +488,8 @@ if __name__ == "__main__":
                         help="Only execute already-seeded approved rows")
     parser.add_argument("--inject-test-slot", action="store_true",
                         help="Insert a test 'approved' row for May 19 lapsed_60_90d and exit")
+    parser.add_argument("--horizon-hours", type=int, default=48,
+                        help="Look-ahead window in hours for approved slots (default 48)")
     args = parser.parse_args()
 
     import psycopg as _psycopg
@@ -526,9 +528,9 @@ if __name__ == "__main__":
         print("Test slot injected — run with --dry-run --build-only to test")
     elif args.seed_only:
         with _psycopg.connect(DATABASE_URL) as conn:
-            seed_approved_slots(conn, dry_run=args.dry_run)
+            seed_approved_slots(conn, dry_run=args.dry_run, horizon_hours=args.horizon_hours)
     elif args.build_only:
         with _psycopg.connect(DATABASE_URL) as conn:
-            build_pending(conn, dry_run=args.dry_run)
+            build_pending(conn, dry_run=args.dry_run, horizon_hours=args.horizon_hours)
     else:
         run(dry_run=args.dry_run)
