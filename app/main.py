@@ -1229,3 +1229,103 @@ async def api_seo_topic_delete(request: Request):
         return JSONResponse({"status": "deleted", "keyword": keyword})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/railway-logs")
+async def api_railway_logs(since: int = 3600, filter_after: str = "", limit: int = 500):
+    """Pull Railway deployment logs for sleep-audio-platform.
+
+    Query params:
+      since       — look back N seconds (default 3600)
+      filter_after — only return lines at/after the first line containing this string
+      limit       — max log lines to fetch from Railway (default 500)
+    """
+    import httpx as _httpx
+    from datetime import datetime, timezone, timedelta
+
+    token      = os.environ.get("RAILWAY_TOKEN", "")
+    project_id = os.environ.get("RAILWAY_PROJECT_ID", "")
+    service_id = os.environ.get("RAILWAY_SERVICE_ID", "")
+    gql_url    = "https://backboard.railway.app/graphql/v2"
+
+    if not token:
+        return JSONResponse({"error": "RAILWAY_TOKEN not set"}, status_code=500)
+    if not project_id or not service_id:
+        return JSONResponse({"error": "RAILWAY_PROJECT_ID or RAILWAY_SERVICE_ID not set"}, status_code=500)
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    def _gql(query: str, variables: dict | None = None) -> dict:
+        r = _httpx.post(gql_url, headers=headers,
+                        json={"query": query, "variables": variables or {}}, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if "errors" in data:
+            raise RuntimeError(str([e.get("message") for e in data["errors"]]))
+        return data["data"]
+
+    try:
+        # Get latest deployment
+        dep_data = _gql("""
+            query($projectId: String!, $serviceId: String!) {
+              deployments(input: {projectId: $projectId, serviceId: $serviceId} first: 1) {
+                edges { node { id status createdAt } }
+              }
+            }
+        """, {"projectId": project_id, "serviceId": service_id})
+        edges = dep_data["deployments"]["edges"]
+        if not edges:
+            return JSONResponse({"error": "no deployments found"}, status_code=404)
+        dep = edges[0]["node"]
+        deployment_id = dep["id"]
+
+        # Fetch logs
+        log_data = _gql("""
+            query($deploymentId: String!) {
+              deploymentLogs(deploymentId: $deploymentId, limit: """ + str(limit) + """) {
+                timestamp severity message
+              }
+            }
+        """, {"deploymentId": deployment_id})
+
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=since)
+        raw    = log_data.get("deploymentLogs", [])
+
+        # Filter by time window
+        lines = []
+        for entry in raw:
+            ts_raw = entry.get("timestamp", "")
+            try:
+                ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            except ValueError:
+                ts = datetime.now(timezone.utc)
+            if ts < cutoff:
+                continue
+            lines.append({
+                "ts":  ts.strftime("%H:%M:%S"),
+                "sev": (entry.get("severity") or "")[:4].upper(),
+                "msg": entry.get("message", ""),
+            })
+
+        # Apply filter_after: drop lines before the first match
+        if filter_after:
+            trigger_idx = next(
+                (i for i, l in enumerate(lines) if filter_after.lower() in l["msg"].lower()),
+                None,
+            )
+            if trigger_idx is not None:
+                lines = lines[trigger_idx:]
+            else:
+                lines = []   # marker not yet seen
+
+        return JSONResponse({
+            "deployment_id": deployment_id,
+            "deployment_status": dep["status"],
+            "since_seconds": since,
+            "filter_after": filter_after or None,
+            "line_count": len(lines),
+            "lines": lines,
+        })
+
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)

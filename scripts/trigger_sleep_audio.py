@@ -19,9 +19,9 @@ SLOT = {
     "date":             date.today().isoformat(),
     "content_type":     "sleep_audio",
     "episode_type":     "sleep_story",
-    "topic_angle":      "Why sleep is the original medicine — a bedtime walk through ancient healing traditions",
+    "topic_angle":      "The science of the golden hour — why the hour before midnight is the most restorative sleep you'll ever get",
     "duration_minutes": 25,
-    "tone_notes":       "philosophical, warm, unhurried",
+    "tone_notes":       "warm, reassuring, gently scientific",
 }
 
 

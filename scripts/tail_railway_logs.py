@@ -11,7 +11,7 @@ Service/internal tokens cannot query the management API and will fail with
 If you have the IDs handy you can skip the discovery step:
     RAILWAY_PROJECT_ID=... RAILWAY_SERVICE_ID=... python3 -m scripts.tail_railway_logs
 
-Polls Railway GraphQL every 3 seconds. Ctrl-C to stop.
+Polls Railway GraphQL every 30 seconds to stay well under rate limits. Ctrl-C to stop.
 """
 from __future__ import annotations
 import argparse
@@ -123,38 +123,48 @@ def latest_deployment(token: str, project_id: str, service_id: str) -> str:
     return dep["id"]
 
 
+_POLL_INTERVAL = 30   # seconds — conservative to avoid Railway rate limits
+
+
 def tail_logs(token: str, deployment_id: str, since_seconds: int = 120,
               filter_after: str = "pipeline_start") -> None:
-    """Poll deployment logs, printing new lines as they arrive.
+    """Poll deployment logs every 30s, printing new lines as they arrive.
+
+    Uses startDate to anchor the query window so Railway returns the full
+    requested history rather than a small recent buffer.
 
     If filter_after is set, suppresses lines until a line containing that
     substring is seen, then prints everything from that point forward.
     """
-    seen:           set[str]  = set()
-    cutoff                    = datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
-    triggered                 = filter_after == ""    # True = print from the start
-    filter_str                = filter_after.lower()
+    seen:      set[str]  = set()
+    cutoff                = datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
+    triggered             = filter_after == ""    # True = print from the start
+    filter_str            = filter_after.lower()
+    start_date            = cutoff.isoformat()
 
     print(f"\n[railway] Tailing logs for deployment {deployment_id[:16]}…")
     if filter_after:
         print(f"[railway] Buffering until line containing {filter_after!r} is seen.")
-    print(f"[railway] Showing lines from the last {since_seconds}s. Ctrl-C to stop.\n")
+    print(f"[railway] Showing lines from the last {since_seconds}s. "
+          f"Polling every {_POLL_INTERVAL}s. Ctrl-C to stop.\n")
     print("─" * 72)
 
     while True:
         try:
             data = _gql(token, """
-                query($deploymentId: String!) {
-                  deploymentLogs(deploymentId: $deploymentId, limit: 500) {
+                query($deploymentId: String!, $startDate: DateTime) {
+                  deploymentLogs(deploymentId: $deploymentId,
+                                 startDate: $startDate,
+                                 limit: 500) {
                     timestamp
                     severity
                     message
                   }
                 }
-            """, {"deploymentId": deployment_id})
+            """, {"deploymentId": deployment_id, "startDate": start_date})
         except Exception as exc:
             print(f"[poll error] {exc}", file=sys.stderr)
-            time.sleep(5)
+            time.sleep(_POLL_INTERVAL)
             continue
 
         new_lines: list[tuple[datetime, str, str]] = []
@@ -195,7 +205,7 @@ def tail_logs(token: str, deployment_id: str, since_seconds: int = 120,
             prefix = f"[{sev[:4].upper()}]" if sev else "     "
             print(f"{ts_str} {prefix} {msg}")
 
-        time.sleep(3)
+        time.sleep(_POLL_INTERVAL)
 
 
 def main() -> None:
@@ -211,9 +221,9 @@ def main() -> None:
 
     filter_after = "" if args.all else args.after
 
-    token = os.environ.get("RAILWAY_TOKEN", "")
+    token = os.environ.get("RAILWAY_PERSONAL_TOKEN") or os.environ.get("RAILWAY_TOKEN", "")
     if not token:
-        print("ERROR: RAILWAY_TOKEN not set", file=sys.stderr)
+        print("ERROR: neither RAILWAY_PERSONAL_TOKEN nor RAILWAY_TOKEN is set", file=sys.stderr)
         sys.exit(1)
 
     try:
