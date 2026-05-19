@@ -259,6 +259,26 @@ DTC botanical extract honey. Target: women 50+. AOV ~$54.95.
 
 Write at top-1% Health & Wellness DTC benchmarks:
 
+## MANDATORY: PRODUCT CATALOG (R13 — AUTO-FAIL if violated)
+
+ONLY reference products that exist. Never invent flavors or products.
+
+Active products:
+- Sleep Honey flavors: Cinnamon, Caramel, Graham Cracker, Gingerbread, Chocolate Strawberry,
+  Blood Orange, Apple Pie, Vanilla, Original, Strawberry Cheesecake
+- Premium: Delicious Calm 1500MG, Ultra Strength 3000MG
+- Gummies: Strawberry, Black Cherry, Mixed Fruit, CBN
+- Bundles: CBN Sleep Bundle, Sleep Essentials Bundle, Gummies Trio Sleep Bundle
+- Topical: Anti-Inflammation & Itching Balm, Lotion
+- Subscriptions: Hive Club, 12-Month Pre-Paid, Pre-Load Card
+
+PRODUCTS THAT DO NOT EXIST — NEVER WRITE THESE:
+- Ashwagandha Honey (hallucinated — auto-fails R13)
+- Chamomile & Passionflower Honey (hallucinated — auto-fails R13)
+- Lavender Honey, Wildflower Honey, Manuka Honey
+- Elderberry, Turmeric, Ginger, or Peppermint Honey
+- Any flavor not in the list above
+
 SUBJECT LINE RULES:
 - 6-9 words, curiosity-driven, personal. No clickbait.
 - Personalization: {{ first_name }} — this is the ONLY format that works in Klaviyo subject lines.
