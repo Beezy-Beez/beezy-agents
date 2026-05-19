@@ -347,26 +347,72 @@ def _latest_sent_issue() -> dict | None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def _build_hma_li(issue: dict) -> str:
+    """Build one <li> for the hma-archive ol on the hub page."""
+    number = issue.get("number", "")
+    title  = issue.get("subject_line") or issue.get("title", "Untitled")
+    dek    = (issue.get("page_dek") or issue.get("topic_summary") or "")[:200]
+    url    = issue.get("shopify_page_url") or "#"
+    num_str = f"{number:03d}" if isinstance(number, int) else str(number)
+    return (
+        f'<li class="hma-item">'
+        f'<p class="hma-issue-num">Issue {num_str}</p>'
+        f'<h2 class="hma-h2"><a href="{url}">{title}</a></h2>'
+        f'<p class="hma-dek">{dek}</p>'
+        f'<a class="hma-read" href="{url}">Read Issue {num_str} →</a>'
+        f'</li>'
+    )
+
+
+def _refresh_hma_archive(body: str, all_issues: list[dict]) -> tuple[str, bool]:
+    """Replace the <ol id="hma-archive"> items with fresh data from DB.
+
+    Returns (new_body, changed).
+    """
+    m = re.search(r'<ol\s[^>]*id="hma-archive"[^>]*>', body)
+    if not m:
+        return body, False
+
+    ol_open_end = m.end()
+    ol_close_idx = body.find("</ol>", ol_open_end)
+    if ol_close_idx == -1:
+        return body, False
+
+    new_items = "\n".join(_build_hma_li(i) for i in all_issues)
+    new_body = body[:ol_open_end] + "\n" + new_items + "\n" + body[ol_close_idx:]
+    changed = new_body != body
+    return new_body, changed
+
+
 def add_issue_to_hubs(issue: dict) -> dict[str, str]:
     """Called after a Hive Mind issue's Klaviyo campaign is created (page is live).
 
-    Rebuilds /pages/the-hive-mind from all issues with campaigns (newest first).
-
-    The "Latest Issue" featured box on /pages/sleep-science-hub is NOT updated here
-    — it is updated daily by refresh_ssh_featured_issue() (called from morning_brief
-    at 8:05am) so it only reflects issues that have already been sent, never a
-    future scheduled draft.
+    - Rebuilds the sentinel card section on /pages/the-hive-mind
+    - Also refreshes the hma-archive <ol> (subscriber library inside the gate)
+    - Does NOT touch /pages/sleep-science-hub (updated by refresh_ssh_featured_issue)
 
     Returns {handle: status} for each hub touched.
     """
     results: dict[str, str] = {}
 
-    # /pages/the-hive-mind — full rebuild from DB so order is always correct
     all_issues = _all_published_issues()
     if not all_issues:
         all_issues = [issue]
+
+    # Update sentinel card section
     all_cards = "".join(_issue_card(i) for i in all_issues)
     results["the-hive-mind"] = _update_hub("the-hive-mind", all_cards)
+
+    # Also refresh hma-archive ol (subscriber library inside the cookie gate)
+    page = _fetch_page("the-hive-mind")
+    if page:
+        new_body, changed = _refresh_hma_archive(page["body"] or "", all_issues)
+        if changed:
+            try:
+                _save_page(page["id"], page["title"], new_body)
+                print("[hub_updater] the-hive-mind hma-archive refreshed")
+            except Exception as exc:
+                print(f"[hub_updater] hma-archive refresh failed: {exc}")
 
     return results
 

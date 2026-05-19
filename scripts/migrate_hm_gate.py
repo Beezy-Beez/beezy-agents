@@ -118,12 +118,29 @@ def _fetch_page_by_handle(handle: str) -> dict | None:
         return None
 
 
+_OLD_ELEMENTS = (
+    'class="epis-newsletter"',
+    'id="hm-archive-link"',
+    'var SUB_KEY="bb_hivemind_sub"',
+)
+
+
+def _has_old_elements(body: str) -> bool:
+    return any(marker in body for marker in _OLD_ELEMENTS)
+
+
 def _patch_episode_page(body: str) -> tuple[str, bool]:
     """Remove old subscribe elements and inject the new gate.
 
+    Only injects the gate if:
+      - old elements were removed, OR
+      - the page already has epis-back (meditation template) and no gate yet.
+
     Returns (new_body, changed).
     """
-    original = body
+    original    = body
+    had_old     = _has_old_elements(body)
+    already_has = 'id="hm-gate"' in body
 
     # 1. Remove both epis-newsletter divs (top + bottom forms)
     body = re.sub(
@@ -133,7 +150,7 @@ def _patch_episode_page(body: str) -> tuple[str, bool]:
         flags=re.DOTALL,
     )
 
-    # 2. Remove the archive link div
+    # 2. Remove the archive link div ("Already subscribed?" box)
     body = re.sub(
         r'<div id="hm-archive-link"[^>]*>.*?</div>\s*',
         "",
@@ -149,24 +166,25 @@ def _patch_episode_page(body: str) -> tuple[str, bool]:
         flags=re.DOTALL,
     )
 
-    # 4. Inject new gate just before the back-link paragraph
-    gate = build_gate_episode()
-    back_pattern = r'(<p class="epis-back">)'
-    if re.search(back_pattern, body):
-        body = re.sub(back_pattern, lambda m: gate + "\n" + m.group(1), body, count=1)
-    else:
-        body = body + "\n" + gate
+    # 4. Inject new gate only when old elements existed or page uses the
+    #    meditation template (has epis-back) and gate is missing.
+    has_back = bool(re.search(r'<p class="epis-back">', body))
+    should_inject = (had_old or has_back) and not already_has
 
-    # 5. Remove any already-injected gate from a previous run (idempotent)
-    # If we matched and replaced, there should only be one gate. But if the
-    # gate was already there AND we re-ran, we'd have two.  Collapse duplicates.
+    if should_inject:
+        gate = build_gate_episode()
+        back_pattern = r'(<p class="epis-back">)'
+        if re.search(back_pattern, body):
+            body = re.sub(back_pattern, lambda m: gate + "\n" + m.group(1), body, count=1)
+        else:
+            body = body + "\n" + gate
+
+    # 5. Collapse duplicate gates from previous idempotent runs
     gate_sections = list(re.finditer(r'<div id="hm-gate"', body))
     if len(gate_sections) > 1:
-        # Keep only the last occurrence (closest to back-link)
-        first_start = gate_sections[0].start()
+        first_start  = gate_sections[0].start()
         second_start = gate_sections[1].start()
-        # Find end of first gate block (next </script> after it)
-        first_end_m = re.search(r'</script>', body[first_start:second_start])
+        first_end_m  = re.search(r'</script>', body[first_start:second_start])
         if first_end_m:
             first_end = first_start + first_end_m.end()
             body = body[:first_start] + body[first_end:]
@@ -175,21 +193,25 @@ def _patch_episode_page(body: str) -> tuple[str, bool]:
     return body, changed
 
 
-def _all_meditation_episodes() -> list[dict]:
+def _all_episodes_to_patch() -> list[dict]:
+    """Return all deployed episodes that may still have old subscription forms."""
     from db.connection import get_conn
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT episode_id, title, episode_type, shopify_page_url
                FROM episodes
-               WHERE episode_type IN ('guided_meditation', 'affirmation_meditation',
-                                      'morning_meditation', 'soundscape')
-                 AND shopify_page_url IS NOT NULL
+               WHERE shopify_page_url IS NOT NULL
                ORDER BY deployed_at DESC"""
         ).fetchall()
     return [
         {"episode_id": r[0], "title": r[1], "episode_type": r[2], "shopify_page_url": r[3]}
         for r in rows
     ]
+
+
+# kept for backward compat
+def _all_meditation_episodes() -> list[dict]:
+    return _all_episodes_to_patch()
 
 
 def _handle_from_url(url: str) -> str:
@@ -199,8 +221,8 @@ def _handle_from_url(url: str) -> str:
 
 
 def patch_episode_pages(dry_run: bool = False) -> None:
-    episodes = _all_meditation_episodes()
-    print(f"\n── Episode pages: patching {len(episodes)} meditation/soundscape pages ──")
+    episodes = _all_episodes_to_patch()
+    print(f"\n── Episode pages: patching {len(episodes)} pages ──")
     for ep in episodes:
         title  = ep["title"][:45]
         handle = _handle_from_url(ep["shopify_page_url"])
@@ -230,6 +252,80 @@ def patch_episode_pages(dry_run: bool = False) -> None:
             print(f"    ERROR: {exc}")
 
 
+# ── Hub page fix ─────────────────────────────────────────────────────────────
+
+_NEW_HUB_SCRIPT = (
+    "<script>(function(){"
+    "function getCookie(n){var m=document.cookie.match('(?:^|;)\\\\s*'+n+'=([^;]*)');return m?decodeURIComponent(m[1]):null;}"
+    "function setCookie(n,v,days){var d=new Date();d.setTime(d.getTime()+days*864e5);document.cookie=n+'='+encodeURIComponent(v)+';expires='+d.toUTCString()+';path=/;SameSite=Lax';}"
+    "function reveal(){var g=document.getElementById('hma-gate');var w=document.getElementById('hma-welcome');var a=document.getElementById('hma-archive');if(g)g.style.display='none';if(w)w.style.display='';if(a)a.style.display='';}"
+    "if(getCookie('hm_subscriber')==='1'){reveal();}"
+    "document.querySelectorAll('.hma-gate-form').forEach(function(form){"
+    "form.addEventListener('submit',function(e){"
+    "e.preventDefault();"
+    "var emailEl=form.querySelector('input[type=\"email\"]');"
+    "var btn=form.querySelector('button[type=\"submit\"]');"
+    "if(!emailEl||!emailEl.value)return;"
+    "var orig=btn.textContent;"
+    "btn.disabled=true;btn.textContent='Unlocking...';"
+    "fetch('https://a.klaviyo.com/client/subscriptions/?company_id=W8SW8k',{"
+    "method:'POST',"
+    "headers:{'Content-Type':'application/json','revision':'2024-10-15'},"
+    "body:JSON.stringify({data:{type:'subscription',attributes:{"
+    "custom_source:'Hive Mind Archive Gate',"
+    "profile:{data:{type:'profile',attributes:{email:emailEl.value}}}"
+    "},relationships:{list:{data:{type:'list',id:'Y6VSre'}}}}})"
+    "}).then(function(r){"
+    "if(r.ok||r.status===202){setCookie('hm_subscriber','1',365);reveal();}"
+    "else{btn.disabled=false;btn.textContent=orig;}"
+    "}).catch(function(){btn.disabled=false;btn.textContent=orig;});"
+    "});"
+    "});"
+    "})();</script>"
+)
+
+
+def fix_hub_page(dry_run: bool = False) -> None:
+    """Update the-hive-mind page JS to use hm_subscriber cookie instead of localStorage."""
+    print("\n── Hub page: updating the-hive-mind ──")
+    page = _fetch_page_by_handle("the-hive-mind")
+    if not page:
+        print("  ERROR: the-hive-mind page not found")
+        return
+
+    body = page["body"] or ""
+
+    if "bb_hivemind_sub" not in body:
+        if "hm_subscriber" in body:
+            print("  already up-to-date")
+        else:
+            print("  WARN: expected script pattern not found — inspect manually")
+        return
+
+    new_body, n = re.subn(
+        r'<script>\(function\(\)\{var SUB_KEY=.bb_hivemind_sub..*?</script>',
+        _NEW_HUB_SCRIPT,
+        body,
+        flags=re.DOTALL,
+    )
+
+    if n == 0:
+        print("  WARN: regex did not match — inspect manually")
+        return
+
+    print(f"  old localStorage script replaced (cookie gate injected)")
+
+    if dry_run:
+        print("  [DRY RUN] skipping write")
+        return
+
+    try:
+        _update_shopify_page(page["id"], new_body)
+        print("  OK — hub page updated")
+    except Exception as exc:
+        print(f"  ERROR: {exc}")
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -237,10 +333,13 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--issues",   action="store_true")
     parser.add_argument("--episodes", action="store_true")
+    parser.add_argument("--hub",      action="store_true")
     args = parser.parse_args()
 
-    run_issues   = args.issues   or not (args.issues or args.episodes)
-    run_episodes = args.episodes or not (args.issues or args.episodes)
+    run_all      = not (args.issues or args.episodes or args.hub)
+    run_issues   = args.issues   or run_all
+    run_episodes = args.episodes or run_all
+    run_hub      = args.hub      or run_all
 
     if args.dry_run:
         print("DRY RUN — no Shopify writes")
@@ -249,6 +348,8 @@ def main():
         rebuild_issue_pages(dry_run=args.dry_run)
     if run_episodes:
         patch_episode_pages(dry_run=args.dry_run)
+    if run_hub:
+        fix_hub_page(dry_run=args.dry_run)
 
     print("\nDone.")
 
