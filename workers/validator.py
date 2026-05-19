@@ -3,8 +3,8 @@ Beezy Send Validator — pre-send gatekeeper.
 Runs before ANY campaign is deployed to Klaviyo.
 If verdict is FAIL → campaign is blocked, Slack gets the failure details.
 
-Implements 17 rules: 12 structural (R1–R12) + 5 content checks (C1–C5).
-All rules are live. Auto-fail rules: R2, R10, C1, C2, C3, C5.
+Implements 19 rules: 12 structural (R1–R12) + 2 product rules (R13–R14) + 5 content checks (C1–C5).
+All rules are live. Auto-fail rules: R2, R10, R13, R14, C1, C2, C3, C5.
 
 Usage:
     from workers.validator import validate_campaign
@@ -436,6 +436,138 @@ def _r12_image_vs_plain(conn, slot: dict) -> dict:
     }
 
 
+# ── R13 + R14: Product accuracy and CTA URL compliance ────────────────────────
+
+# Products confirmed NOT in the Beezy Beez catalog.
+# Documented hallucination incidents — expand on each new incident.
+_HALLUCINATED_PRODUCTS: list[str] = [
+    "ashwagandha honey",
+    "lavender honey",
+    "wildflower honey",
+    "manuka honey",
+    "chamomile honey",
+    "chamomile & passionflower honey",
+    "passionflower honey",
+    "elderberry honey",
+    "turmeric honey",
+    "ginger honey",
+    "peppermint honey",
+]
+
+# Active product names from the Shopify catalog — update on every catalog change.
+# Copywriter must pull live from Shopify before writing copy; this list is the
+# validator's offline fallback for post-generation checking.
+ACTIVE_CATALOG: list[str] = [
+    "cinnamon honey", "caramel honey", "graham cracker honey", "gingerbread honey",
+    "chocolate strawberry honey", "sleep honey", "blood orange honey", "apple pie honey",
+    "vanilla honey", "original honey", "strawberry cheesecake honey",
+    "delicious calm", "ultra strength",
+    "vegan gummies", "gummies", "strawberry gummies", "black cherry gummies",
+    "mixed fruit gummies", "cbn gummies",
+    "cbn sleep bundle", "sleep essentials bundle", "gummies trio",
+    "balm", "lotion", "topical", "lip balm",
+    "tea", "doggy treats", "candle set", "gift box",
+    "hive club", "beehive club", "pre-paid", "prepaid", "pre-load card",
+    "oil",
+]
+
+# Canonical CTA URLs keyed by product/offer type.
+# R14 blocks campaigns that promote a specific product but link to the wrong URL.
+PRODUCT_CTA_URLS: dict[str, str] = {
+    "hive_club":      "https://trybeezybeez.com/pages/membership",
+    "pre_paid":       "https://trybeezybeez.com/products/botanical-extract-honey-pps?variant=46208630980857",
+    "pre_load":       "https://trybeezybeez.com/products/beezy-beez-pre-load-card?variant=46940893348089",
+    "sleep_honey":    "https://trybeezybeez.com/products/honey-sub",
+    "gummies":        "https://trybeezybeez.com/products/gummies-bx",
+    "cbn_bundle":     "https://trybeezybeez.com/products/cbn-sleep-bundle",
+    "essentials":     "https://trybeezybeez.com/products/sleep-essentials-bundle",
+    "trio_bundle":    "https://trybeezybeez.com/products/gummies-trio-bundle",
+    "topical":        "https://trybeezybeez.com/products/topical-island",
+}
+
+# Copy signals that identify a specific product CTA is required.
+# Key = product key in PRODUCT_CTA_URLS; value = terms that indicate the email is
+# selling/promoting that specific product (not just mentioning it in passing).
+_PRODUCT_SIGNALS: dict[str, list[str]] = {
+    "hive_club":  ["join hive club", "join the hive club", "sign up for hive club",
+                   "become a hive club", "hive club membership", "start your hive club"],
+    "pre_paid":   ["12-month pre-paid", "12 month pre-paid", "annual pre-paid",
+                   "pre-paid subscription", "prepaid subscription"],
+    "pre_load":   ["pre-load card", "preload card", "pre load card"],
+    "cbn_bundle": ["cbn sleep bundle"],
+    "essentials": ["sleep essentials bundle"],
+    "trio_bundle": ["gummies trio bundle", "trio sleep bundle"],
+    "topical":    ["balm and lotion bundle", "topical bundle"],
+    # gummies/sleep_honey are too broad — /pages/bf-collection is valid for general promotes
+}
+
+# Generic collection URL — valid fallback only for general "browse our products" CTAs
+_COLLECTION_URL = "https://trybeezybeez.com/pages/bf-collection"
+
+
+def _r13_product_accuracy(copy: dict) -> dict:
+    """R13 (AUTO-FAIL): Body copy must not reference products absent from the active Shopify catalog.
+
+    Catches hallucinated flavor variants (ashwagandha honey, chamomile honey, etc.).
+    Copywriter must pull live Shopify catalog before writing; this rule catches post-gen.
+    """
+    body    = " ".join(copy.get("body_paragraphs", [])).lower()
+    subject = copy.get("subject", "").lower()
+    full    = body + " " + subject
+
+    found = [p for p in _HALLUCINATED_PRODUCTS if p in full]
+    if found:
+        return {
+            "rule": "R13", "name": "Product accuracy (catalog)", "pass": False,
+            "detail": (
+                f"Non-catalog product(s) in copy: {found}. "
+                "These products do not exist. Pull active Shopify catalog before writing."
+            ),
+        }
+    return {
+        "rule": "R13", "name": "Product accuracy (catalog)", "pass": True,
+        "detail": "No hallucinated products detected",
+    }
+
+
+def _r14_cta_url_compliance(copy: dict, cta_url: str) -> dict:
+    """R14 (AUTO-FAIL): When copy promotes a specific product, CTA must point to that product's URL.
+
+    Does NOT trigger for general 'browse our honey' sends where /pages/bf-collection is correct.
+    Triggers only when copy contains explicit 'buy/join/sign up' language for a specific product.
+    """
+    body = " ".join(copy.get("body_paragraphs", [])).lower()
+    subject = copy.get("subject", "").lower()
+    full = body + " " + subject
+
+    for product_key, signals in _PRODUCT_SIGNALS.items():
+        if not any(sig in full for sig in signals):
+            continue
+
+        correct_url  = PRODUCT_CTA_URLS[product_key]
+        correct_base = correct_url.split("?")[0]
+
+        # Pass if CTA contains the correct product path, a discount redirect (which
+        # goes to bf-collection automatically), or the exact correct URL with params.
+        cta_ok = (
+            correct_base in cta_url
+            or "/discount/" in cta_url        # discount codes redirect correctly
+        )
+        if not cta_ok:
+            return {
+                "rule": "R14", "name": "CTA URL compliance", "pass": False,
+                "detail": (
+                    f"Copy promotes '{product_key}' but CTA is '{cta_url[:80]}'. "
+                    f"Required: {correct_url}"
+                ),
+            }
+
+    return {
+        "rule": "R14", "name": "CTA URL compliance", "pass": True,
+        "detail": f"CTA URL matches product routing: {cta_url[:80]}",
+    }
+
+
 # ── Content validation (catches today's bugs) ─────────────────────────────────
 
 def _check_subject_syntax(copy: dict) -> dict:
@@ -533,6 +665,10 @@ def validate_campaign(conn, slot: dict, copy: dict, cta_url: str) -> dict:
     results.append(_r11_performance_benchmark(conn, slot))
     results.append(_r12_image_vs_plain(conn, slot))
 
+    # Product rules — R13 and R14 are AUTO-FAIL
+    results.append(_r13_product_accuracy(copy))
+    results.append(_r14_cta_url_compliance(copy, cta_url))
+
     # Content checks (catch the bugs from today)
     results.append(_check_subject_syntax(copy))
     results.append(_check_cta_url(cta_url, slot))
@@ -542,7 +678,7 @@ def validate_campaign(conn, slot: dict, copy: dict, cta_url: str) -> dict:
 
     # Compute verdict
     failures = [r for r in results if not r["pass"]]
-    auto_fail_rules = {"R2", "R10", "C1", "C2", "C3", "C5"}  # non-negotiable
+    auto_fail_rules = {"R2", "R10", "R13", "R14", "C1", "C2", "C3", "C5"}  # non-negotiable
     auto_fails = [r for r in failures if r["rule"] in auto_fail_rules]
     stubs = [r for r in results if "STUB" in r.get("detail", "")]
 

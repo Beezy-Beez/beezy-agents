@@ -5,6 +5,47 @@ Write at top-1% Health & Wellness DTC benchmarks.
 
 ---
 
+## MANDATORY PRE-COPY STEPS — DO THESE FIRST (R13 + R14 auto-fail if skipped)
+
+### 1. Verify the product catalog (R13 — AUTO-FAIL)
+
+Every product name you write must exist in the active Shopify catalog.
+Pull it live or use this verified list (May 2026):
+
+**Active flavors/products:**
+Sleep Honey: Cinnamon · Caramel · Graham Cracker · Gingerbread · Chocolate Strawberry
+Gummies: Strawberry · Black Cherry · Mixed Fruit · CBN
+Bundles: CBN Sleep Bundle · Sleep Essentials Bundle · Gummies Trio Sleep Bundle
+Topical: Balm · Lotion
+Subscriptions: Hive Club · 12-Month Pre-Paid · Pre-Load Card
+
+**Products that DO NOT EXIST — never write these:**
+- Ashwagandha Honey (hallucinated May 2026 VIP campaign)
+- Chamomile & Passionflower Honey (hallucinated May 2026 lapsed_30d campaign)
+- Lavender Honey, Wildflower Honey, Manuka Honey
+- Elderberry, Turmeric, Ginger, or Peppermint Honey flavors
+- Any flavor variant not in the list above
+
+### 2. Confirm CTA URL before writing body (R14 — AUTO-FAIL)
+
+| Offer being promoted | Required CTA URL |
+|---------------------|-----------------|
+| Hive Club | https://trybeezybeez.com/pages/membership |
+| 12-Month Pre-Paid | https://trybeezybeez.com/products/botanical-extract-honey-pps?variant=46208630980857 |
+| Pre-Load Card | https://trybeezybeez.com/products/beezy-beez-pre-load-card?variant=46940893348089 |
+| Sleep Honey | https://trybeezybeez.com/products/honey-sub |
+| Gummies | https://trybeezybeez.com/products/gummies-bx |
+| CBN Sleep Bundle | https://trybeezybeez.com/products/cbn-sleep-bundle |
+| Sleep Essentials Bundle | https://trybeezybeez.com/products/sleep-essentials-bundle |
+| Gummies Trio Bundle | https://trybeezybeez.com/products/gummies-trio-bundle |
+| Topical Balm & Lotion | https://trybeezybeez.com/products/topical-island |
+| General / browse | https://trybeezybeez.com/pages/bf-collection |
+
+If promoting a specific product → use the product URL. `/pages/bf-collection` is only
+valid for general "browse our range" sends.
+
+---
+
 ## INPUT
 
 You receive a JSON object with:
