@@ -220,31 +220,9 @@ def _render_blocks(blocks: list[dict], in_callout: bool = False) -> str:
     return "\n".join(parts)
 
 
-SUBSCRIBE_BOX_HTML = """<div id="hive-mind-pre-sub">
-<h2 style="font-size:24px; color:#2c2417; margin:0 0 12px 0; font-family:Georgia, serif; font-weight:bold;">Get The Hive Mind in Your Inbox</h2>
-<p style="font-size:18px; line-height:1.75; color:#5a4a3a; margin:0 0 25px 0; font-family:Georgia, serif;">One sleep science deep-dive every three days. No fluff. No products pushed. Just the research and what it means for your nights.</p>
-<form id="hive-mind-subscribe-form" style="margin:0 auto; display:inline-block;">
-<table cellpadding="0" cellspacing="0" border="0">
-<tr>
-<td style="padding-right:8px;">
-<input type="email" id="hive-mind-email" placeholder="your@email.com" required style="width:280px; padding:14px 18px; font-size:16px; font-family:Georgia, serif; border:1px solid #d4a847; border-radius:4px; background:#fffdf7; color:#2c2417; box-sizing:border-box;">
-</td>
-<td>
-<button type="submit" style="padding:14px 28px; font-size:16px; font-family:Georgia, serif; background-color:#8b4513; color:#fffdf7; text-align:center; text-decoration:none; border-radius:4px; font-weight:bold; border:none; cursor:pointer;">Subscribe</button>
-</td>
-</tr>
-</table>
-</form>
-<p id="hive-mind-error" style="display:none; font-size:16px; color:#8b4513; margin:15px 0 0 0; font-family:Georgia, serif;">Something went wrong. Please try again.</p>
-</div>
-<div id="hive-mind-post-sub" style="display:none;">
-<h2 style="font-size:24px; color:#2c2417; margin:0 0 12px 0; font-family:Georgia, serif; font-weight:bold;">✓ You’re subscribed</h2>
-<p style="font-size:18px; line-height:1.75; color:#5a4a3a; margin:0 0 25px 0; font-family:Georgia, serif;">Watch your inbox for the next issue. Meanwhile, you have full access to every issue we’ve ever sent.</p>
-<a href="https://trybeezybeez.com/pages/the-hive-mind" style="display:inline-block; padding:14px 32px; font-size:16px; font-family:Georgia, serif; background-color:#8b4513; color:#fffdf7; text-decoration:none; border-radius:4px; font-weight:bold; letter-spacing:1px;">BROWSE THE ARCHIVE →</a>
-</div>"""
-
-
-SUBSCRIBE_SCRIPT = """<script>(function(){var SUB_KEY="bb_hivemind_sub";function showSubscribed(){var pre=document.getElementById("hive-mind-pre-sub");var post=document.getElementById("hive-mind-post-sub");if(pre)pre.style.display="none";if(post)post.style.display="block"}var params=new URLSearchParams(window.location.search);if(params.get("subscriber")==="true"||params.get("s")==="1"){try{localStorage.setItem(SUB_KEY,"true")}catch(_){}}try{if(localStorage.getItem(SUB_KEY)==="true")showSubscribed()}catch(_){}var form=document.getElementById("hive-mind-subscribe-form");if(form){form.addEventListener("submit",function(n){n.preventDefault();var t=document.getElementById("hive-mind-email").value;if(t){var e=this.querySelector("button");e.textContent="Subscribing...";e.disabled=!0;fetch("https://a.klaviyo.com/client/subscriptions/?company_id=W8SW8k",{method:"POST",headers:{"Content-Type":"application/json",revision:"2024-10-15"},body:JSON.stringify({data:{type:"subscription",attributes:{custom_source:"Hive Mind Issue Page",profile:{data:{type:"profile",attributes:{email:t}}}},relationships:{list:{data:{type:"list",id:"Y6VSre"}}}}})}).then(function(i){if(i.ok||i.status===202){try{localStorage.setItem(SUB_KEY,"true")}catch(_){}showSubscribed()}else{document.getElementById("hive-mind-error").style.display="block";e.textContent="Subscribe";e.disabled=!1}}).catch(function(){document.getElementById("hive-mind-error").style.display="block";e.textContent="Subscribe";e.disabled=!1})}})}})();</script>"""
+# Subscription gate is now generated dynamically by lib.hm_gate.build_gate()
+# which embeds the live issue list at page-build time and uses a cookie
+# (hm_subscriber) instead of localStorage.  No static HTML constants needed here.
 
 
 def _buzzsprout_embed_url(url: str) -> str:
@@ -364,15 +342,11 @@ def build_page_html(issue: dict[str, Any]) -> str:
     )
     parts.append("</div>")
 
-    # Subscribe box (two-state: pre-sub form + post-sub archive CTA)
-    parts.append(f'<div style="{STYLES["sub_box"]}">')
-    parts.append(SUBSCRIBE_BOX_HTML)
-    parts.append("</div>")
+    # Cookie-gated subscribe section: form (no cookie) or full issue library (cookie set)
+    from lib.hm_gate import build_gate
+    parts.append(build_gate())
 
-    # Subscribe handler script (toggles via bb_hivemind_sub localStorage flag)
-    parts.append(SUBSCRIBE_SCRIPT)
-
-        # About blurb
+    # About blurb
     parts.append(
         f'<p style="{STYLES["about"]}">'
         f'<strong>About Beezy Beez.</strong> Beezy Beez crafts '

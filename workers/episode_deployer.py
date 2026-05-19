@@ -333,45 +333,14 @@ _EPIS_FONTS = (
     '<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Lato:wght@400;700&display=swap" rel="stylesheet">'
 )
 
-_EPIS_NEWSLETTER_FORM = """<div class="epis-newsletter"{extra_style}>
-<h3>Get The Hive Mind in Your Inbox</h3>
-<p>One sleep science deep-dive every three days. No products pushed — just the research and what it means for your nights.</p>
-<form class="epis-newsletter-form" method="post" action="https://manage.kmail-lists.com/ajax/subscriptions/subscribe">
-<input type="hidden" name="g" value="Y6VSre"><input type="hidden" name="$source" value="{source}"><input type="email" name="email" placeholder="your@email.com" required><button type="submit">Subscribe</button>
-</form>
-</div>"""
-
 _EPIS_PRODUCT_CTA = """<div style="background:linear-gradient(135deg,#8b4513,#a0522d,#6b3410);padding:40px 30px;border-radius:12px;margin:40px 0;text-align:center;">
 <h3 style="font-family:Cormorant Garamond,Georgia,serif;font-size:26px;font-weight:600;color:#fffdf7;margin:0 0 15px;font-style:italic;">Built to Support Your Body's Natural Rhythm</h3>
 <p style="font-size:16px;line-height:1.65;color:#fffdf7;margin:0 0 25px;opacity:.92;">Beezy Beez Botanical Extract Sleep Honey is designed to support the wind-down phase of your circadian cycle — when your body wants to drop into rest, but stress or overstimulation gets in the way. Clean ingredients. Trusted by 8,500+ five-star customers.</p>
 <a href="https://trybeezybeez.com/products/honey-sub" style="display:inline-block;padding:14px 32px;font-size:14px;background-color:#f0c75e;color:#2c2417;text-decoration:none;border-radius:6px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Try Sleep Honey →</a>
 </div>"""
 
-_EPIS_ARCHIVE_LINK = """<div id="hm-archive-link" style="display:none;text-align:center;padding:28px 24px;margin:32px 0;background:#fffdf7;border:1px dashed #87401C;border-radius:8px;">
-<p style="font-family:Cormorant Garamond,Georgia,serif;font-size:22px;color:#1a1a1a;margin:0 0 6px;font-weight:600;">Already subscribed?</p>
-<p style="font-size:15px;color:#555;margin:0;"><a href="https://trybeezybeez.com/pages/the-hive-mind" style="color:#87401C;text-decoration:underline;font-weight:600;">Browse every Hive Mind issue →</a></p>
-</div>"""
-
-_EPIS_SUBSCRIBER_JS = (
-    "<script>(function(){var SUB_KEY=\"bb_hivemind_sub\";function showArchive(){"
-    "var el=document.getElementById(\"hm-archive-link\");if(el)el.style.display=\"block\"}"
-    "var params=new URLSearchParams(window.location.search);"
-    "if(params.get(\"subscriber\")===\"true\"||params.get(\"s\")===\"1\"){"
-    "try{localStorage.setItem(SUB_KEY,\"true\")}catch(_){}}"
-    "try{if(localStorage.getItem(SUB_KEY)===\"true\")showArchive()}catch(_){}"
-    "document.querySelectorAll('.epis-newsletter-form').forEach(function(e){"
-    "e.addEventListener('submit',function(i){i.preventDefault();"
-    "var t=e.querySelector('button[type=\"submit\"]'),o=t.textContent;"
-    "t.disabled=!0;t.textContent='Subscribing...';"
-    "fetch(e.action,{method:'POST',body:new FormData(e)})"
-    ".then(function(n){return n.json()}).then(function(n){"
-    "if(n.success){try{localStorage.setItem(SUB_KEY,\"true\")}catch(_){}"
-    "e.parentNode.innerHTML='<div style=\"font-family:Cormorant Garamond,Georgia,serif;"
-    "font-size:22px;color:#87401C;padding:14px;text-align:center;line-height:1.4;\">"
-    "✓ You\\'re on the list. Look for a confirmation in your inbox.</div>';"
-    "showArchive();}else{t.disabled=!1;t.textContent=o;}})"
-    ".catch(function(){t.disabled=!1;t.textContent=o});});});})();</script>"
-)
+# Newsletter form and archive link replaced by lib.hm_gate.build_gate_episode()
+# which uses a cookie (hm_subscriber) and shows the full issue library to subscribers.
 
 # Breadcrumb config per episode_type: (hub_label, hub_url, crumb_label)
 _CRUMB_CONFIG: dict[str, tuple[str, str, str]] = {
@@ -521,7 +490,6 @@ def _page_html_meditation(meta: dict[str, Any], page_url: str = "") -> str:
           f'</section>',
         f'<section class="epis-section"><h2 class="epis-h2">About this {about_label}</h2>'
         f'{about_html}</section>',
-        _EPIS_NEWSLETTER_FORM.format(source="meditation-page-top", extra_style=""),
         f'<section class="epis-transcript" aria-labelledby="epis-transcript-h">'
         f'<h2 id="epis-transcript-h" class="epis-h2">Transcript</h2>'
         f'<p class="epis-transcript-meta">{transcript_meta}</p>'
@@ -533,13 +501,17 @@ def _page_html_meditation(meta: dict[str, Any], page_url: str = "") -> str:
         f'<a href="{_SHOPIFY_DOMAIN}/products/honey-sub">Botanical Extract Infused Honey</a> '
         f'is what we make for exactly that moment.</p></section>',
         _EPIS_PRODUCT_CTA,
-        _EPIS_NEWSLETTER_FORM.format(source="meditation-page-bottom", extra_style=' style="margin-top:48px;"'),
-        _EPIS_ARCHIVE_LINK,
+    ]
+
+    # Cookie-gated subscribe section: form (no cookie) or full issue library (cookie set)
+    from lib.hm_gate import build_gate_episode
+    parts.append(build_gate_episode())
+
+    parts += [
         f'<p class="epis-back">← <a href="{back_url}">Back to {back_label}</a></p>',
         '</div></article>',
         f'<script type="application/ld+json">{jsonld_episode}</script>',
         f'<script type="application/ld+json">{jsonld_breadcrumb}</script>',
-        _EPIS_SUBSCRIBER_JS,
     ]
     return "\n".join(parts)
 

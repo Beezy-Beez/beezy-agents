@@ -318,6 +318,37 @@ async def healthz():
     return {"status": "ok"}
 
 
+@app.get("/api/hive-mind/issues")
+def hive_mind_issues():
+    """All published Hive Mind issues, newest first.
+    Consumed by lib.hm_gate JS to refresh the subscriber library dynamically.
+    """
+    from db.connection import get_conn
+    try:
+        with get_conn() as conn:
+            rows = conn.execute(
+                """SELECT number, subject_line, page_dek, shopify_page_url,
+                          cover_image_url, pillar
+                   FROM issues
+                   WHERE status IN ('scheduled', 'published')
+                     AND shopify_page_url IS NOT NULL
+                   ORDER BY number DESC"""
+            ).fetchall()
+        return [
+            {
+                "number": r[0],
+                "title":  r[1] or "",
+                "dek":    (r[2] or "")[:160],
+                "url":    r[3] or "#",
+                "img":    r[4] or "",
+                "pillar": r[5] or "",
+            }
+            for r in rows
+        ]
+    except Exception as exc:
+        return []
+
+
 @app.get("/debug/pacing")
 def debug_pacing():
     """Diagnose pacing data in the deployed container."""
