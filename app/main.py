@@ -314,6 +314,20 @@ def _run_cron_jobs(now: datetime) -> None:
     # Welcome video worker — every tick, fast no-op when queue is empty
     try:
         from workers.welcome_video import run_once as _welcome_video_run_once
+        try:
+            from db.connection import get_conn as _wv_get_conn
+            with _wv_get_conn() as _wv_conn:
+                with _wv_conn.cursor() as _wv_cur:
+                    _wv_cur.execute("SELECT COUNT(*) FROM welcome_video_jobs WHERE status='pending'")
+                    _wv_pending = _wv_cur.fetchone()[0]
+                    _wv_cur.execute(
+                        "SELECT COUNT(*) FROM welcome_video_jobs "
+                        "WHERE status='processing' AND heygen_video_id IS NOT NULL"
+                    )
+                    _wv_in_flight = _wv_cur.fetchone()[0]
+            print(f"[cron] welcome_video tick: pending={_wv_pending}, in_flight={_wv_in_flight}")
+        except Exception as _wv_e:
+            print(f"[cron] welcome_video tick: count error: {_wv_e}")
         _welcome_video_run_once()
     except Exception as e:
         print(f"[cron] welcome_video error: {e}")
@@ -422,7 +436,8 @@ async def debug_db():
                 result["welcome_video_jobs_count"] = cur.fetchone()[0]
 
                 cur.execute(
-                    "SELECT id, order_id, status, created_at, attempts, last_error "
+                    "SELECT id, order_id, status, created_at, attempts, last_error, "
+                    "heygen_video_id, video_url, updated_at "
                     "FROM welcome_video_jobs ORDER BY created_at DESC LIMIT 5"
                 )
                 result["recent_jobs"] = [
@@ -433,6 +448,9 @@ async def debug_db():
                         "created_at": r[3].isoformat() if r[3] else None,
                         "attempts": r[4],
                         "last_error": r[5],
+                        "heygen_video_id": r[6] if r[6] is not None else None,
+                        "video_url": r[7] if r[7] is not None else None,
+                        "updated_at": r[8].isoformat() if r[8] else None,
                     }
                     for r in cur.fetchall()
                 ]
