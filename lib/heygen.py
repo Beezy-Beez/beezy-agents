@@ -107,6 +107,24 @@ def submit_video(first_name: str) -> str:
     return video_id
 
 
+def check_status(video_id: str) -> dict:
+    """One-shot status check, no polling. Returns dict with status, video_url, error."""
+    resp = requests.get(
+        f"{HEYGEN_API_BASE}/v1/video_status.get",
+        params={"video_id": video_id},
+        headers=_headers(),
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise HeyGenError(f"status check failed: {resp.status_code} {resp.text}")
+    data = resp.json().get("data", {})
+    return {
+        "status": data.get("status"),
+        "video_url": data.get("video_url"),
+        "error": data.get("error"),
+    }
+
+
 def poll_until_ready(
     video_id: str,
     timeout_seconds: int = 240,
