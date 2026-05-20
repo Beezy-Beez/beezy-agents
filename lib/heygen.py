@@ -74,9 +74,8 @@ def submit_video(first_name: str) -> str:
         "video_inputs": [
             {
                 "character": {
-                    "type": "avatar",
-                    "avatar_id": _heygen_avatar_id(),
-                    "avatar_style": "normal",
+                    "type": "talking_photo",
+                    "talking_photo_id": HEYGEN_AVATAR_ID,
                 },
                 "voice": {
                     "type": "text",
