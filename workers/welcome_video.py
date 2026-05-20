@@ -15,17 +15,15 @@ On failure: retries up to 3 times, then marks 'dead' and pings Slack.
 
 import os
 import json
-import requests
 from datetime import datetime, timedelta, timezone
 from psycopg.rows import dict_row
 
 from lib.heygen import submit_video, check_status, HeyGenError
+from lib import klaviyo
 from lib import slack
 from db import get_conn
 
 
-KLAVIYO_API_KEY     = os.environ["KLAVIYO_API_KEY"]
-KLAVIYO_PROFILE_URL = "https://a.klaviyo.com/api/profiles"
 SLACK_CHANNEL       = "C0B3DEUJS9G"  # #beezy-agents
 
 MAX_ATTEMPTS        = 3
@@ -105,57 +103,26 @@ def _set_heygen_video_id(conn, job_id: int, heygen_video_id: str) -> None:
         )
 
 
-def _write_klaviyo_profile(email: str, video_url: str) -> None:
-    headers = {
-        "Authorization": f"Klaviyo-API-Key {KLAVIYO_API_KEY}",
-        "revision": "2024-10-15",
-        "accept": "application/json",
-        "content-type": "application/json",
-    }
+def _set_klaviyo_welcome_video_url(email: str, video_url: str) -> None:
+    """Best-effort write of welcome_video_url to the Klaviyo profile.
 
-    lookup = requests.get(
-        f"{KLAVIYO_PROFILE_URL}/?filter=equals(email,\"{email}\")",
-        headers=headers,
-        timeout=15,
-    )
-    lookup.raise_for_status()
-    profiles = lookup.json().get("data", [])
-
-    if not profiles:
-        create = requests.post(
-            KLAVIYO_PROFILE_URL + "/",
-            json={
-                "data": {
-                    "type": "profile",
-                    "attributes": {
-                        "email": email,
-                        "properties": {"welcome_video_url": video_url},
-                    },
-                }
-            },
-            headers=headers,
-            timeout=15,
+    Never raises — Klaviyo failures must not block or fail the worker."""
+    try:
+        profile_id = klaviyo.get_profile_id_by_email(email)
+        if not profile_id:
+            print(f"[klaviyo] WARN no profile found for {email}, skipping welcome_video_url write")
+            return
+        klaviyo.update_profile_properties(
+            profile_id, {"welcome_video_url": video_url}
         )
-        create.raise_for_status()
-        return
-
-    profile_id = profiles[0]["id"]
-
-    update = requests.patch(
-        f"{KLAVIYO_PROFILE_URL}/{profile_id}/",
-        json={
-            "data": {
-                "type": "profile",
-                "id": profile_id,
-                "attributes": {
-                    "properties": {"welcome_video_url": video_url},
-                },
-            }
-        },
-        headers=headers,
-        timeout=15,
-    )
-    update.raise_for_status()
+        print(f"[klaviyo] updated profile {email} with welcome_video_url")
+    except Exception as e:
+        print(f"[klaviyo] ERROR updating {email}: {e}")
+        # Non-blocking Slack heads-up; webhook routes to #beezy-agents (C0B3DEUJS9G).
+        try:
+            slack._post({"text": f"⚠️ Klaviyo profile update failed for *{email}*\nError: `{str(e)[:500]}`"})
+        except Exception as slack_err:
+            print(f"[slack] post failed during klaviyo-error notify: {slack_err}")
 
 
 def _mark_complete(conn, job_id: int, heygen_video_id: str, video_url: str) -> None:
@@ -192,19 +159,17 @@ def _mark_failed_or_dead(conn, job_id: int, attempts: int, error: str) -> str:
 
 
 def _notify_success(first_name: str, email: str) -> None:
-    slack._post(
-        SLACK_CHANNEL,
-        f"✅ Welcome video sent to *{first_name}* ({email})",
-    )
+    slack._post({"text": f"✅ Welcome video sent to *{first_name}* ({email})"})
 
 
 def _notify_dead(first_name: str, email: str, error: str) -> None:
-    slack._post(
-        SLACK_CHANNEL,
-        f"🚨 *Welcome video FAILED 3x — manual intervention needed*\n"
-        f"Customer: {first_name} ({email})\n"
-        f"Last error: `{error[:500]}`",
-    )
+    slack._post({
+        "text": (
+            f"🚨 *Welcome video FAILED 3x — manual intervention needed*\n"
+            f"Customer: {first_name} ({email})\n"
+            f"Last error: `{error[:500]}`"
+        )
+    })
 
 
 def run_once() -> dict:
@@ -240,21 +205,9 @@ def run_once() -> dict:
                 if not url:
                     # Completed but no URL — treat as still rendering and try next tick.
                     continue
-                try:
-                    _write_klaviyo_profile(job["email"], url)
-                except requests.HTTPError as e:
-                    new_status = _mark_failed_or_dead(
-                        conn, job["id"], job["attempts"],
-                        f"Klaviyo write failed: {e}",
-                    )
-                    conn.commit()
-                    result["failed"] += 1
-                    if new_status == "dead":
-                        _notify_dead(job["first_name"], job["email"], f"Klaviyo write failed: {e}")
-                    continue
-
                 _mark_complete(conn, job["id"], job["heygen_video_id"], url)
                 conn.commit()
+                _set_klaviyo_welcome_video_url(job["email"], url)
                 _notify_success(job["first_name"], job["email"])
                 result["completed"] += 1
 
