@@ -50,7 +50,7 @@ class HeyGenError(Exception):
 
 def _headers() -> dict:
     return {
-        "X-Api-Key": _heygen_api_key(),
+        "X-Api-Key": os.environ.get("HEYGEN_API_KEY"),
         "Content-Type": "application/json",
     }
 
@@ -75,13 +75,13 @@ def submit_video(first_name: str) -> str:
             {
                 "character": {
                     "type": "avatar",
-                    "avatar_id": HEYGEN_AVATAR_ID,
+                    "avatar_id": os.environ.get("HEYGEN_AVATAR_ID"),
                     "avatar_style": "normal",
                 },
                 "voice": {
                     "type": "text",
                     "input_text": script,
-                    "voice_id": _heygen_voice_id(),
+                    "voice_id": os.environ.get("HEYGEN_VOICE_ID"),
                     "speed": 1.0,
                 },
             }

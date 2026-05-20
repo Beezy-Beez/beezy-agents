@@ -282,7 +282,7 @@ def run_once() -> dict:
 
         try:
             video_id = submit_video(job["first_name"])
-        except HeyGenError as e:
+        except Exception as e:
             new_status = _mark_failed_or_dead(conn, job["id"], job["attempts"], str(e))
             conn.commit()
             result["submit_failed"] = True
