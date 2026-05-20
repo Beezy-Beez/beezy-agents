@@ -3,6 +3,13 @@ Beezy Agents — unified web server.
 Slack agent runs every 5 seconds.
 All cron jobs run on time-based schedule in background.
 Single deployment handles everything.
+
+SINGLE SOURCE OF TRUTH FOR CAMPAIGN DISPATCH:
+  pacing.orchestrator.run_daily at 8am ET — the ONLY system that dispatches
+  calendar campaigns. No other worker should create or dispatch calendar slots.
+
+Removed: workers.calendar_campaign_builder (was creating duplicate calendar
+plans and dispatching them independently, causing double-dispatch at 8am).
 """
 import sys
 import os
@@ -11,7 +18,7 @@ import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.dashboard import router as dashboard_router
@@ -26,7 +33,7 @@ async def _slack_loop():
     """Polls Slack every 5s; exponential backoff (30s→60s→…→300s) on network errors."""
     import httpx as _httpx
     loop = asyncio.get_event_loop()
-    _net_backoff = 0   # consecutive network-error count
+    _net_backoff = 0
     _net_logged  = False
     while True:
         try:
@@ -39,7 +46,7 @@ async def _slack_loop():
             await asyncio.sleep(5)
         except _httpx.NetworkError as e:
             _net_backoff += 1
-            sleep_secs = min(30 * _net_backoff, 300)   # 30→60→90→…→300s cap
+            sleep_secs = min(30 * _net_backoff, 300)
             if not _net_logged:
                 print(f"[slack_loop] Network unreachable ({e}). Backing off — will retry silently.")
                 _net_logged = True
@@ -49,225 +56,278 @@ async def _slack_loop():
             await asyncio.sleep(30)
 
 
-def _mark_ran_today(key: str) -> None:
-    """Write today's date into agent_state so catch-up logic knows this job ran."""
+def _try_claim_today(key: str) -> bool:
+    """Atomically claim today's run slot for `key`.
+
+    Uses INSERT ... ON CONFLICT DO NOTHING so only ONE process/instance can
+    claim a given key per calendar day — even if two instances race.
+
+    Returns True if this call successfully claimed the slot (run it).
+    Returns False if another instance already claimed it (skip it).
+    """
     try:
         from db.connection import get_conn
         from datetime import date
         today = date.today().isoformat()
         with get_conn() as conn:
-            conn.execute(
-                "INSERT INTO agent_state (key, value, updated_at) VALUES (%s, %s, NOW()) "
-                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            # Try to INSERT today's date. If the key already exists with today's
+            # value another instance already ran — DO NOTHING and return 0 rows.
+            # If the value is stale (yesterday) update it and return 1 row.
+            result = conn.execute(
+                """INSERT INTO agent_state (key, value, updated_at) VALUES (%s, %s, NOW())
+                   ON CONFLICT (key) DO UPDATE
+                     SET value = EXCLUDED.value, updated_at = NOW()
+                     WHERE agent_state.value != EXCLUDED.value
+                   RETURNING key""",
                 (key, today),
-            )
-            conn.commit()
-    except Exception:
-        pass
-
-
-def _ran_today(key: str) -> bool:
-    """Return True if this job already ran today (checked via agent_state)."""
-    try:
-        from db.connection import get_conn
-        from datetime import date
-        today = date.today().isoformat()
-        with get_conn() as conn:
-            row = conn.execute(
-                "SELECT value FROM agent_state WHERE key = %s", (key,)
             ).fetchone()
-        return row is not None and row[0] == today
-    except Exception:
-        return False
+            conn.commit()
+        return result is not None  # True = we claimed it; False = already claimed today
+    except Exception as e:
+        print(f"[cron] _try_claim_today({key}) failed: {e}")
+        return False  # On DB error, skip rather than double-run
 
 
 def _run_cron_jobs(now: datetime) -> None:
     """Synchronous cron dispatch — runs in a thread executor."""
     h, m = now.hour, now.minute
+    from lib.jobs import run_job
 
     if h % 4 == 0 and m < 2:
         try:
-            from ingestion.sync import run_shopify_sync, run_klaviyo_sync
-            print("[cron] ingestion sync")
-            run_shopify_sync()
-            run_klaviyo_sync()
+            with run_job("ingestion_sync", trigger="cron") as job:  # time-gated
+                from ingestion.sync import run_shopify_sync, run_klaviyo_sync
+                print("[cron] ingestion sync")
+                run_shopify_sync()
+                run_klaviyo_sync()
         except Exception as e:
             print(f"[cron] ingestion error: {e}")
 
-    # Pacing brain: 7:30am ET target. Catch-up window: 7:30–8:29am (server-restart safe).
+    # Pacing brain: 7:30am ET. Catch-up window 7:30–8:59am. Atomic claim prevents double-run.
     if (h == 7 and m >= 30) or h == 8:
-        if not _ran_today("cron_pacing_brain"):
+        if _try_claim_today("cron_pacing_brain"):
             try:
-                from pacing.cron import run_daily as pacing_daily
-                print("[cron] pacing brain" + (" [catch-up]" if not (h == 7 and m == 30) else ""))
-                pacing_daily()
-                _mark_ran_today("cron_pacing_brain")
+                with run_job("cron_pacing_brain", trigger="cron") as job:  # claim-gated
+                    from pacing.cron import run_daily as pacing_daily
+                    print("[cron] pacing brain")
+                    pacing_daily()
             except Exception as e:
                 print(f"[cron] pacing error: {e}")
 
-    # Orchestrator: 8:00am ET target. Catch-up window: 8:00–9:00am (runs once via _ran_today guard).
+    # Orchestrator: 8:00am ET. Catch-up window 8:00–9:00am. Atomic claim prevents double-run.
+    # THIS IS THE ONLY SYSTEM THAT DISPATCHES CALENDAR CAMPAIGNS.
     if h == 8 or (h == 9 and m == 0):
-        if not _ran_today("cron_orchestrator"):
+        if _try_claim_today("cron_orchestrator"):
             try:
-                from pacing.orchestrator import run_daily
-                print("[cron] orchestrator" + (" [catch-up]" if not (h == 8 and m == 0) else ""))
-                run_daily()
-                _mark_ran_today("cron_orchestrator")
+                with run_job("cron_orchestrator", trigger="cron") as job:  # claim-gated
+                    from pacing.orchestrator import run_daily
+                    print("[cron] orchestrator")
+                    run_daily()
             except Exception as e:
                 print(f"[cron] orchestrator error: {e}")
 
-    # Audience health monitor — daily at 7:40am (once per day guard)
+    # Audience health monitor — daily at 7:40am
     if h == 7 and m == 40:
-        if not _ran_today("cron_audience_health"):
+        if _try_claim_today("cron_audience_health"):
             try:
-                from workers.audience_health import run_audience_health
-                print("[cron] audience health")
-                run_audience_health()
-                _mark_ran_today("cron_audience_health")
+                with run_job("cron_audience_health", trigger="cron") as job:  # claim-gated
+                    from workers.audience_health import run_audience_health
+                    print("[cron] audience health")
+                    run_audience_health()
             except Exception as e:
                 print(f"[cron] audience health error: {e}")
 
-    # Pacing cache refresh — daily at 7:35am (after pacing brain)
+    # Pacing cache refresh — daily at 7:35am
     if h == 7 and m == 35:
         try:
-            from workers.pacing_cache import refresh_pacing_cache
-            print('[cron] pacing cache refresh')
-            refresh_pacing_cache()
+            with run_job("pacing_cache_refresh", trigger="cron") as job:  # time-gated
+                from workers.pacing_cache import refresh_pacing_cache
+                print('[cron] pacing cache refresh')
+                refresh_pacing_cache()
         except Exception as e:
             print(f'[cron] pacing cache error: {e}')
 
-    # Revenue backfill — daily at 9am, pulls 72h-old campaign performance
+    # Revenue backfill — daily at 9am
     if h == 9 and m == 0:
         try:
-            from workers.revenue_backfill import run_backfill
-            print("[cron] revenue backfill")
-            run_backfill()
+            with run_job("revenue_backfill", trigger="cron") as job:  # time-gated
+                from workers.revenue_backfill import run_backfill
+                print("[cron] revenue backfill")
+                run_backfill()
         except Exception as e:
             print(f"[cron] backfill error: {e}")
 
     # Weekly learning review — Sunday at 9pm ET
     if now.weekday() == 6 and h == 21 and m == 0:
         try:
-            from workers.learning_loop import run_weekly
-            print("[cron] weekly learning review")
-            run_weekly()
+            with run_job("learning_loop_weekly", trigger="cron") as job:  # time-gated
+                from workers.learning_loop import run_weekly
+                print("[cron] weekly learning review")
+                run_weekly()
         except Exception as e:
             print(f"[cron] weekly review error: {e}")
 
-    # Weekly flow health check — Sunday at 9:15pm ET (after campaign review)
+    # Weekly flow health check — Sunday at 9:15pm ET
     if now.weekday() == 6 and h == 21 and m == 15:
         try:
-            from workers.flow_monitor import run_flow_check
-            print("[cron] flow health check")
-            run_flow_check()
+            with run_job("flow_monitor", trigger="cron") as job:  # time-gated
+                from workers.flow_monitor import run_flow_check
+                print("[cron] flow health check")
+                run_flow_check()
         except Exception as e:
             print(f"[cron] flow monitor error: {e}")
 
-    # Bi-weekly pacing check — 15th of month at 9am
+    # Bi-weekly pacing check — 15th at 9:30am
     if now.day == 15 and h == 9 and m == 30:
         try:
-            from workers.learning_loop import run_biweekly
-            print("[cron] bi-weekly pacing check")
-            run_biweekly()
+            with run_job("learning_loop_biweekly", trigger="cron") as job:  # time-gated
+                from workers.learning_loop import run_biweekly
+                print("[cron] bi-weekly pacing check")
+                run_biweekly()
         except Exception as e:
             print(f"[cron] biweekly error: {e}")
 
-    # Monthly retrospective — 1st of month at 9am
+    # Monthly retrospective — 1st at 9:30am
     if now.day == 1 and h == 9 and m == 30:
         try:
-            from workers.learning_loop import run_monthly
-            print("[cron] monthly retrospective")
-            run_monthly()
+            with run_job("learning_loop_monthly", trigger="cron") as job:  # time-gated
+                from workers.learning_loop import run_monthly
+                print("[cron] monthly retrospective")
+                run_monthly()
         except Exception as e:
             print(f"[cron] monthly retro error: {e}")
 
     # Pending campaign auto-schedule — every 5 minutes
     if m % 5 == 0:
         try:
-            from workers.beezy_campaign import check_pending_schedules
-            check_pending_schedules()
+            from workers.beezy_campaign import (
+                check_pending_schedules, _pending_schedules_due)
+            if _pending_schedules_due():                              # 5-min watchdog
+                with run_job("pending_schedules", trigger="cron") as job:
+                    job.detail = {"acted": check_pending_schedules()}
         except Exception as e:
             print(f"[cron] pending_schedules error: {e}")
 
     # TTS 30-min watchdog — every 5 minutes
     if m % 5 == 0:
         try:
-            from workers.sleep_audio_producer import check_tts_timeouts
-            check_tts_timeouts()
+            from workers.sleep_audio_producer import (
+                check_tts_timeouts, _tts_candidates_due)
+            if _tts_candidates_due():                                 # 5-min watchdog
+                with run_job("tts_timeout_watchdog", trigger="cron") as job:
+                    job.detail = {"acted": check_tts_timeouts()}
         except Exception as e:
             print(f"[cron] tts_timeout error: {e}")
 
-    # Morning briefing — 8:05am daily (after orchestrator, once per day guard)
+    # Control-plane watchdog — hourly. Heartbeat gated to the 11:00 ET tick
+    # (after deliverability_check at 10:30) so it reports the day's critical
+    # jobs; the _try_claim_today claim is a restart-safety belt so a
+    # top-of-hour restart cannot double-post the heartbeat.
+    if m == 0:
+        try:
+            with run_job("watchdog", trigger="cron") as job:
+                from workers.watchdog import run_watchdog
+                hb = (h == 11) and _try_claim_today("watchdog_heartbeat")
+                job.detail = run_watchdog(emit_heartbeat=hb)
+        except Exception as e:
+            print(f"[cron] watchdog error: {e}")
+
+    # Morning briefing — 8:05am daily
     if h == 8 and m == 5:
-        if not _ran_today("cron_morning_brief"):
+        if _try_claim_today("cron_morning_brief"):
             try:
-                from workers.morning_brief import run_morning_brief
-                print("[cron] morning brief")
-                run_morning_brief()
-                _mark_ran_today("cron_morning_brief")
+                with run_job("cron_morning_brief", trigger="cron") as job:  # claim-gated
+                    from workers.morning_brief import run_morning_brief
+                    print("[cron] morning brief")
+                    run_morning_brief()
             except Exception as e:
                 print(f"[cron] morning brief error: {e}")
 
+    # Publish pages + update index pages — 8:05am ET (right after orchestrator)
+    # Adds new Hive Mind issues to the archive + SSH_FEATURED, adds episodes to library.
+    # Idempotent — skips anything already up-to-date.
+    if h == 8 and m == 5:
+        if _try_claim_today("cron_publish_and_index"):
+            try:
+                with run_job("cron_publish_and_index", trigger="cron") as job:  # claim-gated
+                    from workers.publish_and_index import run as run_publish
+                    print("[cron] publish and index")
+                    run_publish()
+            except Exception as e:
+                print(f"[cron] publish_and_index error: {e}")
+
+    # Hive Mind newsletter campaign auto-create — 10am daily
+    # NOTE: This ONLY creates Hive Mind newsletter campaigns from the issues table.
+    # It does NOT touch the main calendar campaign pipeline.
     if h == 10 and m == 0:
         try:
-            from workers.klaviyo_campaign import auto_create_pending
-            print("[cron] hive mind campaign")
-            auto_create_pending()
+            with run_job("hive_mind_campaign", trigger="cron") as job:  # time-gated
+                from workers.klaviyo_campaign import auto_create_pending
+                print("[cron] hive mind campaign")
+                auto_create_pending()
         except Exception as e:
             print(f"[cron] hive mind error: {e}")
 
-    if h == 9 and m == 45:
-        try:
-            from workers.calendar_campaign_builder import run as run_calendar_builder
-            print("[cron] calendar campaign builder")
-            run_calendar_builder()
-        except Exception as e:
-            print(f"[cron] calendar campaign builder error: {e}")
+    # REMOVED: calendar_campaign_builder at 9:45am — was creating a parallel
+    # calendar plan and dispatching it independently, causing duplicate campaigns.
+    # The orchestrator at 8am is the single source of truth for campaign dispatch.
 
     if h == 10 and m == 30:
         try:
-            from workers.deliverability_monitor import run_deliverability_check
-            print("[cron] deliverability check")
-            run_deliverability_check()
+            with run_job("deliverability_check", trigger="cron") as job:  # time-gated
+                from workers.deliverability_monitor import run_deliverability_check
+                print("[cron] deliverability check")
+                run_deliverability_check()
         except Exception as e:
             print(f"[cron] deliverability error: {e}")
 
-    # Hive Mind status sync — 9:10pm daily (check Klaviyo for Sent campaigns → mark published → refresh SSH)
+    # Hive Mind status sync — 9:10pm daily
     if h == 21 and m == 10:
         try:
-            from workers.hive_mind_status_sync import sync_sent_campaigns
-            print("[cron] hive_mind_status_sync")
-            sync_sent_campaigns()
+            with run_job("hive_mind_status_sync", trigger="cron") as job:  # time-gated
+                from workers.hive_mind_status_sync import sync_sent_campaigns
+                print("[cron] hive_mind_status_sync")
+                sync_sent_campaigns()
         except Exception as e:
             print(f"[cron] hive_mind_status_sync error: {e}")
 
-    # Weekly approval brief — Sunday 9:05pm ET (after learning_loop at 9pm finishes)
+    # Weekly approval brief — Sunday 9:05pm ET
     if now.weekday() == 6 and h == 21 and m == 5:
         try:
-            from pacing.weekly_brief import run_weekly_brief
-            print("[cron] weekly brief")
-            run_weekly_brief()
+            with run_job("weekly_brief", trigger="cron") as job:  # time-gated
+                from pacing.weekly_brief import run_weekly_brief
+                print("[cron] weekly brief")
+                run_weekly_brief()
         except Exception as e:
             print(f"[cron] weekly brief error: {e}")
 
     # Monday 9:30am: escalation nudge if week still not approved
     if now.weekday() == 0 and h == 9 and m == 30:
         try:
-            from pacing.weekly_brief import run_approval_nudge
-            print("[cron] approval nudge")
-            run_approval_nudge()
+            with run_job("approval_nudge", trigger="cron") as job:  # time-gated
+                from pacing.weekly_brief import run_approval_nudge
+                print("[cron] approval nudge")
+                run_approval_nudge()
         except Exception as e:
             print(f"[cron] approval nudge error: {e}")
+
+    # Welcome video worker — every tick, fast no-op when queue is empty
+    try:
+        from workers.welcome_video import run_once as _welcome_video_run_once
+        _welcome_video_run_once()
+    except Exception as e:
+        print(f"[cron] welcome_video error: {e}")
 
     import calendar as _cal
     last_day = _cal.monthrange(now.year, now.month)[1]
     if now.day == last_day - 7 and h == 9 and m == 0:
         try:
-            from pacing.calendar import run_monthly
-            from datetime import timedelta
-            next_month = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
-            print("[cron] calendar generation")
-            run_monthly(month_start=next_month.date())
+            with run_job("calendar_generation", trigger="cron") as job:  # time-gated
+                from pacing.calendar import run_monthly
+                from datetime import timedelta
+                next_month = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
+                print("[cron] calendar generation")
+                run_monthly(month_start=next_month.date())
         except Exception as e:
             print(f"[cron] calendar error: {e}")
 
@@ -304,6 +364,45 @@ async def deploy_health():
     return {"status": "ok"}
 
 
+@app.post("/webhook/first-order")
+async def first_order_webhook(request: Request):
+    """
+    Klaviyo calls this when a customer places their first order.
+    Queues a welcome-video job and returns immediately.
+
+    Expected payload: {"email": "...", "first_name": "...", "order_id": "..."}
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid json")
+
+    email      = (payload.get("email") or "").strip().lower()
+    first_name = (payload.get("first_name") or "").strip()
+    order_id   = str(payload.get("order_id") or "").strip()
+
+    if not email or not first_name or not order_id:
+        raise HTTPException(
+            status_code=400,
+            detail="missing required field: email, first_name, order_id",
+        )
+
+    from db.connection import get_conn
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO welcome_video_jobs (order_id, email, first_name, status)
+                VALUES (%s, %s, %s, 'pending')
+                ON CONFLICT (order_id) DO NOTHING
+                """,
+                (order_id, email, first_name),
+            )
+        conn.commit()
+
+    return {"status": "queued", "order_id": order_id}
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -320,8 +419,11 @@ async def healthz():
 
 @app.get("/api/hive-mind/issues")
 def hive_mind_issues():
-    """All published Hive Mind issues, newest first.
+    """Sent Hive Mind issues, newest first.
     Consumed by lib.hm_gate JS to refresh the subscriber library dynamically.
+
+    Only returns issues that are published OR whose scheduled_send_at has passed.
+    Never returns future/unsent issues.
     """
     from db.connection import get_conn
     try:
@@ -330,7 +432,8 @@ def hive_mind_issues():
                 """SELECT number, subject_line, page_dek, shopify_page_url,
                           cover_image_url, pillar
                    FROM issues
-                   WHERE status IN ('scheduled', 'published')
+                   WHERE (status = 'published'
+                       OR (status = 'scheduled' AND scheduled_send_at IS NOT NULL AND scheduled_send_at <= NOW()))
                      AND shopify_page_url IS NOT NULL
                    ORDER BY number DESC"""
             ).fetchall()
@@ -378,10 +481,6 @@ async def root():
     return RedirectResponse(url="/dashboard/", status_code=302)
 
 
-# Serve the Next.js operator dashboard (static export) at /dashboard.
-# Built artifacts live in dashboard/out (committed; Replit Autoscale does
-# not run `npm run build`). The legacy HTML dashboard stays at
-# /dashboard-classic as a fallback.
 _DASH_OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "dashboard", "out")
 if os.path.isdir(_DASH_OUT):
@@ -395,7 +494,7 @@ else:
 
 @app.post("/api/approve-week")
 async def approve_week():
-    """Write approval for the current week — same as typing 'approved week' in Slack."""
+    """Write approval for the current week."""
     from datetime import date, timedelta
     today = date.today()
     import hashlib, os
@@ -418,7 +517,7 @@ async def approve_week():
 
 @app.post("/api/approve-month")
 async def approve_month():
-    """Mark this month's calendar as approved — same as typing 'approved' in Slack."""
+    """Mark this month's calendar as approved."""
     from datetime import date
     today = date.today()
     try:
@@ -450,7 +549,7 @@ async def approve_month():
 
 @app.post("/api/refresh-pacing")
 async def refresh_pacing():
-    """Manually trigger pacing cache refresh — pulls live MTD revenue from Klaviyo."""
+    """Manually trigger pacing cache refresh."""
     try:
         loop = asyncio.get_event_loop()
         from workers.pacing_cache import refresh_pacing_cache
@@ -467,7 +566,7 @@ async def refresh_pacing():
 
 @app.post("/api/refresh-audience-health")
 async def refresh_audience_health():
-    """Pull Klaviyo campaign history → compute RPR per audience → cache in agent_state."""
+    """Pull Klaviyo campaign history → compute RPR per audience → cache."""
     try:
         loop = asyncio.get_running_loop()
         from app.dashboard import pull_klaviyo_audience_health
@@ -479,7 +578,7 @@ async def refresh_audience_health():
 
 @app.post("/api/run-flow-check")
 async def run_flow_check():
-    """Run the weekly flow health check now — pulls 30-day Klaviyo flow metrics."""
+    """Run the weekly flow health check now."""
     try:
         loop = asyncio.get_running_loop()
         from workers.flow_monitor import run_flow_check as _flow_check
@@ -491,7 +590,7 @@ async def run_flow_check():
 
 @app.post("/api/run-deliverability-check")
 async def run_deliverability_check_endpoint():
-    """Run deliverability check now — pulls 30-day Klaviyo bounce/spam/unsub rates."""
+    """Run deliverability check now."""
     try:
         loop = asyncio.get_running_loop()
         from workers.deliverability_monitor import run_deliverability_check
@@ -503,7 +602,7 @@ async def run_deliverability_check_endpoint():
 
 @app.post("/api/retry-slot")
 async def retry_slot(id: str):
-    """Re-queue a failed calendar_executions row by setting status='pending'."""
+    """Re-queue a failed calendar_executions row."""
     try:
         from db.connection import get_conn
         with get_conn() as conn:
@@ -577,7 +676,6 @@ def _run_boost() -> dict:
                    HAVING COUNT(*) >= 2
                    ORDER BY rpr DESC LIMIT 10"""
             ).fetchall()
-            # Filter to those not sent in last 7 days
             for r in rows:
                 audience, ct = r[0], r[1]
                 last = conn.execute(
@@ -614,21 +712,11 @@ def _run_boost() -> dict:
 
 @app.post("/api/slack/interactive")
 async def slack_interactive(request: Request):
-    """
-    Handles Slack interactive callbacks (button clicks).
-
-    Currently supports:
-      action_id = "apply_flow_fix"  →  value = "<template_id>:<flow_id>"
-        Assigns the pre-generated fix template to all email messages in the flow,
-        then posts a confirmation back to Slack.
-
-    Slack requires a 200 response within 3s; heavy work runs in a thread executor.
-    """
+    """Handles Slack interactive callbacks (button clicks)."""
     import json
     import urllib.parse
 
     raw_body = await request.body()
-    # Slack sends as URL-encoded: payload=<json>
     parsed   = urllib.parse.parse_qs(raw_body.decode("utf-8"))
     payload_str = (parsed.get("payload") or ["{}"])[0]
     try:
@@ -642,11 +730,7 @@ async def slack_interactive(request: Request):
 
 
 def _handle_slack_action(payload: dict) -> None:
-    """Synchronous handler for Slack interactive actions. Runs in a thread."""
-    import os
-    import httpx as _httpx
-    from lib.slack import _post as slack_post
-
+    """Synchronous handler for Slack interactive actions."""
     actions = payload.get("actions") or []
     response_url = payload.get("response_url", "")
 
@@ -676,7 +760,6 @@ def _apply_flow_fix_template(template_id: str, flow_id: str, response_url: str) 
         "Content-Type": "application/json",
     }
 
-    # Get all flow messages
     try:
         resp = _httpx.get(
             f"https://a.klaviyo.com/api/flows/{flow_id}/flow-messages/",
@@ -744,17 +827,13 @@ def _reply(response_url: str, text: str) -> None:
 
 
 # ── Next.js Dashboard JSON API ────────────────────────────────────────────────
-# All /api/data/* endpoints return pure JSON consumed by the Next.js dashboard.
-# They reuse the same data functions as the FastAPI HTML dashboard.
 
 @app.get("/api/data/overview")
 def api_data_overview():
-    """Combined overview: pacing + today's slots + approval status."""
     from app.dashboard import _pacing, _today_slots, _next_send_date, _approval_status
     p = _pacing()
     slots = _today_slots()
     apv = _approval_status()
-    # Serialize date objects
     if apv.get("week_start"):
         apv["week_start"] = str(apv["week_start"])
     return JSONResponse({
@@ -767,7 +846,6 @@ def api_data_overview():
 
 @app.get("/api/data/calendar")
 def api_data_calendar():
-    """Full calendar plan for the current month."""
     from app.dashboard import _upcoming_slots, _approval_status
     apv = _approval_status()
     if apv.get("week_start"):
@@ -777,7 +855,6 @@ def api_data_calendar():
 
 @app.get("/api/data/audiences")
 def api_data_audiences():
-    """Audience health + burn list."""
     from app.dashboard import _audience_health
     import json as _json
     health = _audience_health()
@@ -796,10 +873,8 @@ def api_data_audiences():
 
 @app.get("/api/data/analytics")
 def api_data_analytics():
-    """Top performers + learning loop RPR table + 30-day revenue trend."""
     from app.dashboard import _top_performers, _learning_loop
     import json as _json
-    # 30-day daily revenue from performance table
     trend: list = []
     try:
         from db.connection import get_conn
@@ -823,7 +898,6 @@ def api_data_analytics():
 
 @app.get("/api/data/flows")
 def api_data_flows():
-    """Flow health from strategies table."""
     from app.dashboard import _flow_health
     data = _flow_health() or {}
     return JSONResponse(data)
@@ -831,7 +905,6 @@ def api_data_flows():
 
 @app.get("/api/data/content")
 def api_data_content():
-    """Hive Mind issues + SEO topics + episodes."""
     import json as _json
     issues: list = []
     seo_topics: list = []
@@ -870,7 +943,6 @@ def api_data_content():
 
 @app.get("/api/data/system")
 def api_data_system():
-    """System health: cron sentinels, DB connection, env vars present."""
     import json as _json
     import os as _os
     cron_sentinels: dict = {}
@@ -907,7 +979,6 @@ def api_data_system():
 
 @app.post("/api/burn-audience")
 async def api_burn_audience(audience: str):
-    """Add an audience to the burn list."""
     import json as _json
     try:
         from db.connection import get_conn
@@ -936,7 +1007,6 @@ async def api_burn_audience(audience: str):
 
 @app.post("/api/unburn-audience")
 async def api_unburn_audience(audience: str):
-    """Remove an audience from the burn list."""
     import json as _json
     try:
         from db.connection import get_conn
@@ -962,7 +1032,7 @@ async def api_unburn_audience(audience: str):
 
 @app.post("/api/slack-command")
 async def api_slack_command(request: Request):
-    """Send a message to #beezy-agents as if typed by Boris."""
+    """Send a message to #beezy-agents as if typed by Alan."""
     import json as _json
     import os as _os
     body = await request.json()
@@ -1047,25 +1117,22 @@ async def api_run_learning_loop():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-# ── Extended read endpoints (business / trajectory / deliverability) ──────────
+# ── Extended read endpoints ───────────────────────────────────────────────────
 
 @app.get("/api/data/business")
 def api_data_business():
-    """Store-wide Shopify revenue, AOV, attribution split, 30-day store trend."""
     from app.dashboard import _store_revenue, _pacing
     return JSONResponse({"store": _store_revenue(), "pacing": _pacing()})
 
 
 @app.get("/api/data/pacing-history")
 def api_data_pacing_history():
-    """Daily actual-vs-target pacing trajectory for charting."""
     from app.dashboard import _pacing_history
     return JSONResponse({"history": _pacing_history()})
 
 
 @app.get("/api/data/deliverability")
 def api_data_deliverability():
-    """Bounce / unsubscribe / delivery posture (monitor row or live 30d)."""
     from app.dashboard import _deliverability
     return JSONResponse(_deliverability())
 
@@ -1080,7 +1147,6 @@ _SLOT_EDITABLE = {
 
 
 def _load_plan(conn, month: str):
-    """Return (decision_id, payload_dict) for the latest calendar_plan of `month`."""
     row = conn.execute(
         "SELECT id, output FROM decisions WHERE decision_type='calendar_plan' "
         "AND output->>'month'=%s ORDER BY created_at DESC LIMIT 1",
@@ -1102,7 +1168,6 @@ def _save_plan(conn, decision_id: str, payload: dict) -> None:
 
 @app.post("/api/calendar/slot")
 async def api_calendar_slot_add(request: Request):
-    """Add a new slot to the month's calendar plan."""
     body = await request.json()
     slot = {k: v for k, v in body.items() if k in _SLOT_EDITABLE}
     if not slot.get("date") or not slot.get("content_type") or not slot.get("audience"):
@@ -1124,7 +1189,6 @@ async def api_calendar_slot_add(request: Request):
 
 @app.patch("/api/calendar/slot")
 async def api_calendar_slot_edit(request: Request):
-    """Edit a slot. Body: {locator:{date,content_type,audience}, fields:{...}}."""
     body = await request.json()
     loc = body.get("locator") or {}
     fields = {k: v for k, v in (body.get("fields") or {}).items() if k in _SLOT_EDITABLE}
@@ -1157,7 +1221,6 @@ async def api_calendar_slot_edit(request: Request):
 
 @app.delete("/api/calendar/slot")
 async def api_calendar_slot_delete(request: Request):
-    """Remove a slot. Body: {date, content_type, audience}."""
     body = await request.json()
     d, ct, aud = body.get("date"), body.get("content_type"), body.get("audience")
     if not d or not ct or not aud:
@@ -1192,7 +1255,6 @@ _ISSUE_EDITABLE = {
 
 @app.patch("/api/content/issue")
 async def api_issue_edit(request: Request):
-    """Edit Hive Mind issue fields. Body: {number, fields:{...}}."""
     body = await request.json()
     number = body.get("number")
     fields = {k: v for k, v in (body.get("fields") or {}).items() if k in _ISSUE_EDITABLE}
@@ -1214,7 +1276,6 @@ async def api_issue_edit(request: Request):
 
 @app.post("/api/content/seo-topic")
 async def api_seo_topic_add(request: Request):
-    """Queue a new SEO keyword. Body: {keyword}."""
     body = await request.json()
     keyword = (body.get("keyword") or "").strip()
     if not keyword:
@@ -1223,8 +1284,7 @@ async def api_seo_topic_add(request: Request):
         from db.connection import get_conn
         with get_conn() as conn:
             conn.execute(
-                "INSERT INTO seo_topics (keyword, status, created_at) "
-                "VALUES (%s, 'pending', NOW())",
+                "INSERT INTO seo_topics (keyword, status, created_at) VALUES (%s, 'pending', NOW())",
                 (keyword,),
             )
             conn.commit()
@@ -1235,7 +1295,6 @@ async def api_seo_topic_add(request: Request):
 
 @app.patch("/api/content/seo-topic")
 async def api_seo_topic_edit(request: Request):
-    """Update an SEO topic. Body: {keyword, status?}."""
     body = await request.json()
     keyword = (body.get("keyword") or "").strip()
     status = body.get("status")
@@ -1244,9 +1303,7 @@ async def api_seo_topic_edit(request: Request):
     try:
         from db.connection import get_conn
         with get_conn() as conn:
-            conn.execute(
-                "UPDATE seo_topics SET status=%s WHERE keyword=%s", (status, keyword)
-            )
+            conn.execute("UPDATE seo_topics SET status=%s WHERE keyword=%s", (status, keyword))
             conn.commit()
         return JSONResponse({"status": "updated", "keyword": keyword, "new_status": status})
     except Exception as e:
@@ -1255,7 +1312,6 @@ async def api_seo_topic_edit(request: Request):
 
 @app.delete("/api/content/seo-topic")
 async def api_seo_topic_delete(request: Request):
-    """Remove an SEO topic. Body: {keyword}."""
     body = await request.json()
     keyword = (body.get("keyword") or "").strip()
     if not keyword:
@@ -1272,13 +1328,7 @@ async def api_seo_topic_delete(request: Request):
 
 @app.get("/api/railway-logs")
 async def api_railway_logs(since: int = 3600, filter_after: str = "", limit: int = 500):
-    """Pull Railway deployment logs for sleep-audio-platform.
-
-    Query params:
-      since       — look back N seconds (default 3600)
-      filter_after — only return lines at/after the first line containing this string
-      limit       — max log lines to fetch from Railway (default 500)
-    """
+    """Pull Railway deployment logs for sleep-audio-platform."""
     import httpx as _httpx
     from datetime import datetime, timezone, timedelta
 
@@ -1304,7 +1354,6 @@ async def api_railway_logs(since: int = 3600, filter_after: str = "", limit: int
         return data["data"]
 
     try:
-        # Get latest deployment
         dep_data = _gql("""
             query($projectId: String!, $serviceId: String!) {
               deployments(input: {projectId: $projectId, serviceId: $serviceId} first: 1) {
@@ -1318,7 +1367,6 @@ async def api_railway_logs(since: int = 3600, filter_after: str = "", limit: int
         dep = edges[0]["node"]
         deployment_id = dep["id"]
 
-        # Fetch logs
         log_data = _gql("""
             query($deploymentId: String!) {
               deploymentLogs(deploymentId: $deploymentId, limit: """ + str(limit) + """) {
@@ -1330,7 +1378,6 @@ async def api_railway_logs(since: int = 3600, filter_after: str = "", limit: int
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=since)
         raw    = log_data.get("deploymentLogs", [])
 
-        # Filter by time window
         lines = []
         for entry in raw:
             ts_raw = entry.get("timestamp", "")
@@ -1346,7 +1393,6 @@ async def api_railway_logs(since: int = 3600, filter_after: str = "", limit: int
                 "msg": entry.get("message", ""),
             })
 
-        # Apply filter_after: drop lines before the first match
         if filter_after:
             trigger_idx = next(
                 (i for i, l in enumerate(lines) if filter_after.lower() in l["msg"].lower()),
@@ -1355,7 +1401,7 @@ async def api_railway_logs(since: int = 3600, filter_after: str = "", limit: int
             if trigger_idx is not None:
                 lines = lines[trigger_idx:]
             else:
-                lines = []   # marker not yet seen
+                lines = []
 
         return JSONResponse({
             "deployment_id": deployment_id,
@@ -1368,3 +1414,17 @@ async def api_railway_logs(since: int = 3600, filter_after: str = "", limit: int
 
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+# ── Approval endpoints ────────────────────────────────────────────────────────
+
+@app.post("/api/refresh-pacing")
+async def refresh_pacing_2():
+    """Alias — handled above."""
+    pass
+
+
+@app.post("/api/retry-slot")
+async def retry_slot_2(id: str):
+    """Alias — handled above."""
+    pass
