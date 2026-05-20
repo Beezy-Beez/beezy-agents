@@ -407,7 +407,7 @@ async def first_order_webhook(request: Request):
 async def debug_db():
     result: dict = {}
     try:
-        result["database_url_prefix"] = os.environ.get("DATABASE_URL", "")[:80]
+        result["database_url_prefix"] = os.environ.get("POSTGRES_URL", "")[:80]
 
         from db.connection import get_conn
         with get_conn() as conn:
@@ -422,7 +422,7 @@ async def debug_db():
                 result["welcome_video_jobs_count"] = cur.fetchone()[0]
 
                 cur.execute(
-                    "SELECT id, order_id, status, created_at "
+                    "SELECT id, order_id, status, created_at, attempts, last_error "
                     "FROM welcome_video_jobs ORDER BY created_at DESC LIMIT 5"
                 )
                 result["recent_jobs"] = [
@@ -431,6 +431,8 @@ async def debug_db():
                         "order_id": r[1],
                         "status": r[2],
                         "created_at": r[3].isoformat() if r[3] else None,
+                        "attempts": r[4],
+                        "last_error": r[5],
                     }
                     for r in cur.fetchall()
                 ]
@@ -492,7 +494,7 @@ def hive_mind_issues():
 def debug_pacing():
     """Diagnose pacing data in the deployed container."""
     import json, os
-    result = {"database_url_set": bool(os.environ.get("DATABASE_URL")),
+    result = {"database_url_set": bool(os.environ.get("POSTGRES_URL")),
               "error": None, "raw_value": None, "parsed": None}
     try:
         from db.connection import get_conn
@@ -1002,7 +1004,7 @@ def api_data_system():
         cron_sentinels = {"error": str(e)}
 
     env_keys = ["KLAVIYO_API_KEY", "SHOPIFY_ACCESS_TOKEN", "BEEZY_ANTHROPIC_API_KEY",
-                "SLACK_BOT_TOKEN", "DATABASE_URL", "HIGGSFIELD_KEY"]
+                "SLACK_BOT_TOKEN", "POSTGRES_URL", "HIGGSFIELD_KEY"]
     env_status = {k: bool(_os.environ.get(k)) for k in env_keys}
 
     return JSONResponse({
