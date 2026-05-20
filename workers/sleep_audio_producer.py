@@ -291,9 +291,43 @@ def _store_pending_tts_run(*, episode_id: str, run_id: str, title: str) -> None:
         print(f"[sleep_audio] Failed to store pending TTS run (non-fatal): {exc}")
 
 
-def check_tts_timeouts() -> None:
+# Shared by the predicate and the actor — never two hardcoded numbers.
+TTS_TIMEOUT_AGE_MIN = 30  # minutes a TTS run may be pending before alerting
+
+
+def _tts_candidates_due() -> bool:
+    """Pure read — a GATE, not a handoff. Returns True iff >=1 pending TTS run
+    is past TTS_TIMEOUT_AGE_MIN. Never mutates or writes. The actor re-checks
+    (incl. the Buzzsprout-URL lookup) and decides whether to alert."""
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM agent_state WHERE key='pending_tts_runs'"
+            ).fetchone()
+    except Exception:
+        return False
+    if not row:
+        return False
+    try:
+        runs = json.loads(row[0])
+    except Exception:
+        return False
+    now = datetime.now(timezone.utc)
+    for run in runs:
+        try:
+            dispatched_at = datetime.fromisoformat(run["dispatched_at"])
+        except (KeyError, ValueError):
+            continue
+        if (now - dispatched_at).total_seconds() / 60 >= TTS_TIMEOUT_AGE_MIN:
+            return True
+    return False
+
+
+def check_tts_timeouts() -> bool:
     """Called every 5 min by cron. Alerts #beezy-agents if a TTS run has been
-    pending > 30 minutes without a Buzzsprout URL appearing in the episodes table.
+    pending > TTS_TIMEOUT_AGE_MIN without a Buzzsprout URL in the episodes
+    table. Returns True iff it sent >=1 timeout alert this pass.
     """
     try:
         from db.connection import get_conn
@@ -302,16 +336,17 @@ def check_tts_timeouts() -> None:
                 "SELECT value FROM agent_state WHERE key='pending_tts_runs'"
             ).fetchone()
         if not row:
-            return
+            return False
         runs: list[dict] = json.loads(row[0])
     except Exception:
-        return
+        return False
 
     if not runs:
-        return
+        return False
 
     now = datetime.now(timezone.utc)
     still_pending: list[dict] = []
+    acted = False
 
     for run in runs:
         try:
@@ -320,7 +355,7 @@ def check_tts_timeouts() -> None:
             continue
         age_minutes = (now - dispatched_at).total_seconds() / 60
 
-        if age_minutes < 30:
+        if age_minutes < TTS_TIMEOUT_AGE_MIN:
             still_pending.append(run)
             continue
 
@@ -342,6 +377,7 @@ def check_tts_timeouts() -> None:
             continue
 
         # Still no audio after 30 min — alert Boris
+        acted = True
         run_id  = run.get("run_id", "unknown")
         title   = run.get("title", "unknown")
         print(f"[sleep_audio] TTS timeout alert — run_id: {run_id}")
@@ -371,6 +407,7 @@ def check_tts_timeouts() -> None:
             conn.commit()
     except Exception as exc:
         print(f"[sleep_audio] Failed to update pending_tts_runs: {exc}")
+    return acted
 
 
 def _post_slack_auto_dispatch(

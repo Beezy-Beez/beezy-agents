@@ -12,6 +12,17 @@ Examples:
     python -m workers.run --skill hive_mind --issue 15 --allow-overwrite
     python -m workers.run --skill hive_mind --issue 15 --dry-run
     python -m workers.run --skill hive_mind --no-image
+
+NUMBERING (fixed May 2026):
+    Auto-detect uses FIRST-GAP logic, not MAX(number)+1. The next issue is the
+    one after the last *contiguous* issue. A stray high-numbered row (e.g. a
+    mis-numbered 020) can never create or widen a gap. The gap self-heals as
+    issues are filled in.
+
+SCHEDULING:
+    scheduled_send_at is populated on insert from the fixed 3-day cadence
+    anchored on Issue 014 (May 15, 2026). This is what the publish_and_index
+    worker reads to know which issue sends today.
 """
 from __future__ import annotations
 
@@ -19,6 +30,7 @@ import argparse
 import json
 import sys
 import uuid
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 import psycopg
@@ -28,14 +40,39 @@ from lib.slack import notify_failure, post_draft
 from workers.skill_runner import invoke_skill
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Hive Mind cadence — single source of truth for issue send dates.
+# Issue 014 sent May 15, 2026. Every issue sends 3 days after the previous one.
+# To change the cadence, change these three constants.
+# ─────────────────────────────────────────────────────────────────────────────
+HIVE_MIND_ANCHOR_ISSUE = 14
+HIVE_MIND_ANCHOR_DATE = date(2026, 5, 15)
+HIVE_MIND_CADENCE_DAYS = 3
+
+
+def _compute_scheduled_send_at(issue_number: int) -> Optional[datetime]:
+    """Send timestamp for an issue, derived from the fixed 3-day cadence.
+
+    Stored at 12:00 UTC on the send date so that `scheduled_send_at::date`
+    always yields the correct calendar send date regardless of DB session
+    timezone. The actual send *time* (8pm ET) lives on the Klaviyo campaign.
+    """
+    if issue_number is None:
+        return None
+    send_date = HIVE_MIND_ANCHOR_DATE + timedelta(
+        days=(issue_number - HIVE_MIND_ANCHOR_ISSUE) * HIVE_MIND_CADENCE_DAYS
+    )
+    return datetime(send_date.year, send_date.month, send_date.day, 12, 0, 0, tzinfo=timezone.utc)
+
+
 def _fetch_state(conn: psycopg.Connection, target_issue: Optional[int]) -> dict[str, Any]:
     """Build context for the draft call.
 
     If target_issue is given (explicit), look up issue (target_issue - 1) as the topic-
     binding teaser, and filter recent_issues to numbers < target_issue.
 
-    If target_issue is None (auto-detect), use the top issue in the DB to compute the
-    next number, and use that top issue's teaser as the topic binding.
+    If target_issue is None (auto-detect), use FIRST-GAP logic to find the next
+    issue number, and chain the topic from the last contiguous issue's teaser.
     """
     if target_issue is not None:
         cur = conn.execute(
@@ -59,23 +96,44 @@ def _fetch_state(conn: psycopg.Connection, target_issue: Optional[int]) -> dict[
         )
         rows = cur.fetchall()
     else:
-        cur = conn.execute(
-            """
-            select number, character_name, character_year, pillar, topic_summary, until_next_teaser
-            from issues order by number desc limit 1
-            """
-        )
-        top = cur.fetchone()
-        if not top:
+        # ── Auto-detect the next issue number — FIRST-GAP logic. ──────────────
+        # The next issue is the one after the last *contiguous* issue, NOT
+        # max(number)+1. A stray high-numbered row (e.g. a mis-numbered 020)
+        # must never create or widen a gap. Walk the sorted numbers from the
+        # bottom and stop at the first gap.
+        cur = conn.execute("select number from issues order by number asc")
+        all_numbers = [r[0] for r in cur.fetchall()]
+        if not all_numbers:
             return {
                 "target_issue_number": 1,
                 "previous_teaser": None,
                 "previous_teaser_source": None,
                 "recent_issues": [],
             }
-        target_issue = top[0] + 1
-        previous_teaser = top[5]
-        previous_teaser_source = top[0]
+
+        last_contiguous = all_numbers[0]
+        for n in all_numbers[1:]:
+            if n == last_contiguous + 1:
+                last_contiguous = n
+            elif n <= last_contiguous:
+                continue  # duplicate / lower — ignore
+            else:
+                break  # first gap — stop here
+
+        target_issue = last_contiguous + 1
+
+        # Topic binding: chain from the issue we are following (last_contiguous),
+        # using its until_next_teaser as the assignment for the new issue.
+        cur = conn.execute(
+            """
+            select number, until_next_teaser
+            from issues where number = %s
+            """,
+            (last_contiguous,),
+        )
+        prev_row = cur.fetchone()
+        previous_teaser = prev_row[1] if prev_row else None
+        previous_teaser_source = prev_row[0] if prev_row else None
 
         cur = conn.execute(
             """
@@ -145,6 +203,10 @@ def _insert_draft_issue(
     page_dek = issue_data.get("page_meta_description") or ""
     page_breadcrumb_label = issue_data.get("topic_summary") or ""
 
+    # scheduled_send_at — derived from the fixed cadence so publish_and_index
+    # and the campaign scheduler always know when this issue sends.
+    scheduled_send_at = _compute_scheduled_send_at(issue_data.get("issue_number"))
+
     conn.execute(
         """
         insert into issues (
@@ -156,7 +218,7 @@ def _insert_draft_issue(
             long_form_body, email_teaser_body,
             until_next_teaser, previous_issues_referenced,
             read_time_min, word_count_long_form, word_count_email_teaser,
-            drafted_at, status, run_id
+            drafted_at, scheduled_send_at, status, run_id
         ) values (
             %s, %s, %s, %s,
             %s, %s, %s, %s,
@@ -166,7 +228,7 @@ def _insert_draft_issue(
             %s, %s,
             %s, %s,
             %s, %s, %s,
-            now(), 'draft', %s
+            now(), %s, 'draft', %s
         )
         on conflict (number) do update set
             subject_line = excluded.subject_line,
@@ -191,6 +253,7 @@ def _insert_draft_issue(
             word_count_long_form = excluded.word_count_long_form,
             word_count_email_teaser = excluded.word_count_email_teaser,
             drafted_at = now(),
+            scheduled_send_at = excluded.scheduled_send_at,
             status = 'draft',
             run_id = excluded.run_id
         where issues.status = 'draft'
@@ -218,6 +281,7 @@ def _insert_draft_issue(
             issue_data.get("read_time_min"),
             long_form_wc,
             teaser_wc,
+            scheduled_send_at,
             uuid.UUID(run_id) if run_id else None,
         ),
     )
@@ -310,6 +374,25 @@ def main(argv: list[str] | None = None) -> int:
         with psycopg.connect(DATABASE_URL) as conn:
             state = _fetch_state(conn, target_issue=args.issue)
             target_issue_number = state["target_issue_number"]
+
+            # ── Gap guard ────────────────────────────────────────────────────
+            # An explicit --issue must never leap past the sequence. This is
+            # the exact hole that let a "020" get drafted while max was 016.
+            # Filling an existing gap (e.g. --issue 19 when 18 is missing) and
+            # overwriting an existing issue both remain allowed; only numbers
+            # beyond max+1 are refused.
+            if args.issue is not None:
+                cur = conn.execute("select coalesce(max(number), 0) from issues")
+                max_existing = cur.fetchone()[0]
+                if args.issue > max_existing + 1:
+                    print(
+                        f"[run] REFUSED: --issue {args.issue} would create a gap. "
+                        f"Highest existing issue is {max_existing}; the next allowed "
+                        f"number is {max_existing + 1}. Use --issue {max_existing + 1}, "
+                        f"or omit --issue to auto-detect.",
+                        file=sys.stderr,
+                    )
+                    return 2
 
             if not args.dry_run and not args.no_save:
                 ok, reason = _check_overwrite_safety(conn, target_issue_number, args.allow_overwrite)

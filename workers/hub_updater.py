@@ -274,7 +274,12 @@ def _update_hub(handle: str, items_html: str) -> str:
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 def _all_published_issues() -> list[dict]:
-    """Return all Hive Mind issues that have a Klaviyo campaign (scheduled or sent), newest first."""
+    """Return all Hive Mind issues that have actually been sent, newest first.
+
+    FIX: 'scheduled' issues are future/unsent — excluded. Only issues with
+    status='published' OR whose scheduled_send_at has already passed are shown.
+    This prevents future issues from leaking into the subscriber library.
+    """
     try:
         from db.connection import get_conn
         with get_conn() as conn:
@@ -282,7 +287,8 @@ def _all_published_issues() -> list[dict]:
                 """SELECT number, subject_line, page_dek, cover_image_url,
                           shopify_page_url, pillar, read_time_min
                    FROM issues
-                   WHERE status IN ('scheduled', 'published')
+                   WHERE status = 'published'
+                      OR (status = 'scheduled' AND scheduled_send_at IS NOT NULL AND scheduled_send_at <= NOW())
                    ORDER BY number DESC"""
             ).fetchall()
         return [

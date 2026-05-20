@@ -13,6 +13,20 @@ Commands Boris can type in #beezy-agents:
   "generate calendar"  → regenerate this month's calendar
   "run weekly brief"   → post next 7 days to Slack now
   "deploy latest episode" → trigger episode deployer pipeline
+
+    # publish_and_index commands
+    if lower in ("update indexes", "publish today", "update index", "publish indexes"):
+        try:
+            from workers.publish_and_index import run as _run_pub
+            result = _run_pub()
+            errors = result.get("errors", [])
+            if errors:
+                return f"⚠️ Index update done with {len(errors)} error(s). Check Slack."
+            hm = len(result.get("hive_mind", []))
+            ep = len(result.get("episodes", []))
+            return f"✅ Index pages updated — {hm} issue(s), {ep} episode(s). Check Slack."
+        except Exception as e:
+            return f"❌ publish_and_index failed: {e}"
   Any other message    → Claude interprets and acts or explains
 
 Also watches #beezy-new-episodes for ready episodes and deploys them

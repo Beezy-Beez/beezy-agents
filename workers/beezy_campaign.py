@@ -1057,30 +1057,70 @@ def _patch_message_subject(message_id: str, subject: str) -> None:
         raise RuntimeError(f"PATCH campaign-message {resp.status_code}: {resp.text[:200]}")
 
 
-def check_pending_schedules() -> None:
-    """Called by cron every few minutes — schedules any campaigns older than 60 minutes."""
+# Shared by the predicate and the actor — never two hardcoded numbers.
+PENDING_SCHEDULE_AGE_MIN = 60  # minutes a queued campaign waits before scheduling
+
+
+def _pending_schedules_due() -> bool:
+    """Pure read — a GATE, not a handoff. Returns True iff >=1 non-cancelled
+    pending campaign is past PENDING_SCHEDULE_AGE_MIN. Never claims, mutates,
+    or writes anything. The actor re-checks and does the real work."""
+    try:
+        from db.connection import get_conn
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM agent_state WHERE key='pending_schedules'"
+            ).fetchone()
+    except Exception:
+        return False
+    if not row:
+        return False
+    try:
+        pending = json.loads(row[0])
+    except Exception:
+        return False
+    now = datetime.now(timezone.utc)
+    for entry in pending:
+        if entry.get("cancelled"):
+            continue
+        try:
+            queued_at = datetime.fromisoformat(
+                entry["queued_at"].replace("Z", "+00:00"))
+        except (KeyError, ValueError):
+            continue
+        if (now - queued_at).total_seconds() / 60 >= PENDING_SCHEDULE_AGE_MIN:
+            return True
+    return False
+
+
+def check_pending_schedules() -> bool:
+    """Called by cron every few minutes — schedules any campaigns older than
+    PENDING_SCHEDULE_AGE_MIN. Returns True iff it scheduled/attempted >=1
+    campaign this pass (gates whether a jobs row is written)."""
     try:
         from db.connection import get_conn
         with get_conn() as conn:
             row = conn.execute("SELECT value FROM agent_state WHERE key='pending_schedules'").fetchone()
         if not row:
-            return
+            return False
         pending = json.loads(row[0])
     except Exception as e:
         print(f"[check_pending_schedules] read error: {e}")
-        return
+        return False
 
     now = datetime.now(timezone.utc)
     updated = []
+    acted = False
     for entry in pending:
         if entry.get("cancelled"):
             continue  # skip cancelled
         queued_at = datetime.fromisoformat(entry["queued_at"].replace("Z", "+00:00"))
         age_minutes = (now - queued_at).total_seconds() / 60
-        if age_minutes < 60:
+        if age_minutes < PENDING_SCHEDULE_AGE_MIN:
             updated.append(entry)  # keep — not yet 60 minutes
             continue
         # Time to schedule
+        acted = True
         campaign_id   = entry["campaign_id"]
         message_id    = entry.get("message_id", "")
         slot          = entry.get("slot", {})
@@ -1148,3 +1188,4 @@ def check_pending_schedules() -> None:
             conn.commit()
     except Exception as e:
         print(f"[check_pending_schedules] write error: {e}")
+    return acted
