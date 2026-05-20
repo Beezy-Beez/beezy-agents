@@ -1,23 +1,21 @@
-import os
 from contextlib import contextmanager
 import psycopg
 import config
 
+_WRONG_DB_HOST = "ep-royal-cell-aq3d2wj0-pooler.c-8.us-east-1.aws.neon.tech"
+
 
 @contextmanager
 def get_conn():
-    pg_host = os.environ.get("PGHOST")
-    pg_database = os.environ.get("PGDATABASE")
-    pg_user = os.environ.get("PGUSER")
-    pg_password = os.environ.get("PGPASSWORD")
-    pg_port = os.environ.get("PGPORT")
-    if all([pg_host, pg_database, pg_user, pg_password, pg_port]):
-        database_url = f"postgresql://{pg_user}:{pg_password}@{pg_host}:{pg_port}/{pg_database}?sslmode=require"
-    else:
-        database_url = config.DATABASE_URL
-    if not database_url:
+    if not config.DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not set.")
-    conn = psycopg.connect(database_url, keepalives=1, keepalives_idle=10, keepalives_interval=5, keepalives_count=3)
+    if _WRONG_DB_HOST in config.DATABASE_URL:
+        raise RuntimeError(
+            f"DATABASE_URL points at {_WRONG_DB_HOST}, which has an empty 'neondb' "
+            "and is NOT the beezy-agents database. Update the Replit secret to the "
+            "real Neon endpoint before any worker runs."
+        )
+    conn = psycopg.connect(config.DATABASE_URL, keepalives=1, keepalives_idle=10, keepalives_interval=5, keepalives_count=3)
     try:
         yield conn
     finally:

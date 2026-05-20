@@ -421,7 +421,7 @@ async def first_order_webhook(request: Request):
 async def debug_db():
     result: dict = {}
     try:
-        result["database_url_prefix"] = os.environ.get("POSTGRES_URL", "")[:80]
+        result["database_url_prefix"] = (os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL", ""))[:80]
 
         from db.connection import get_conn
         with get_conn() as conn:
@@ -512,7 +512,7 @@ def hive_mind_issues():
 def debug_pacing():
     """Diagnose pacing data in the deployed container."""
     import json, os
-    result = {"database_url_set": bool(os.environ.get("POSTGRES_URL")),
+    result = {"database_url_set": bool(os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")),
               "error": None, "raw_value": None, "parsed": None}
     try:
         from db.connection import get_conn
@@ -1022,7 +1022,7 @@ def api_data_system():
         cron_sentinels = {"error": str(e)}
 
     env_keys = ["KLAVIYO_API_KEY", "SHOPIFY_ACCESS_TOKEN", "BEEZY_ANTHROPIC_API_KEY",
-                "SLACK_BOT_TOKEN", "POSTGRES_URL", "HIGGSFIELD_KEY"]
+                "SLACK_BOT_TOKEN", "DATABASE_URL", "HIGGSFIELD_KEY"]
     env_status = {k: bool(_os.environ.get(k)) for k in env_keys}
 
     return JSONResponse({
