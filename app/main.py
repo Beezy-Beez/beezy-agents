@@ -403,6 +403,42 @@ async def first_order_webhook(request: Request):
     return {"status": "queued", "order_id": order_id}
 
 
+@app.get("/debug/db")
+async def debug_db():
+    result: dict = {}
+    try:
+        result["database_url_prefix"] = os.environ.get("DATABASE_URL", "")[:80]
+
+        from db.connection import get_conn
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_database(), current_user, inet_server_addr()::text")
+                row = cur.fetchone()
+                result["current_database"] = row[0]
+                result["current_user"] = row[1]
+                result["inet_server_addr"] = row[2]
+
+                cur.execute("SELECT count(*) FROM welcome_video_jobs")
+                result["welcome_video_jobs_count"] = cur.fetchone()[0]
+
+                cur.execute(
+                    "SELECT id, order_id, status, created_at "
+                    "FROM welcome_video_jobs ORDER BY created_at DESC LIMIT 5"
+                )
+                result["recent_jobs"] = [
+                    {
+                        "id": r[0],
+                        "order_id": r[1],
+                        "status": r[2],
+                        "created_at": r[3].isoformat() if r[3] else None,
+                    }
+                    for r in cur.fetchall()
+                ]
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
