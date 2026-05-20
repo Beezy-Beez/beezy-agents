@@ -32,7 +32,7 @@ def _heygen_voice_id() -> str:
 WELCOME_SCRIPT = (
     "Hey {first_name} — I'm Alan, from Beezy Beez, and I just saw your order come in. "
     "I wanted to jump on real quick and personally say thank you. "
-    "This isn't a big corporation. It's me, a small team, and a whole lot of obsession over getting your sleep right. "
+    "This isn't a big corporation. It's just a few of us - a small team, and a whole lot of obsession over getting your sleep right. "
     "You made a good choice. Give it a few nights, be consistent, and pay attention to how you feel in the morning. "
     "We're here if you need anything — reply to any email and you'll get a real human. "
     "Welcome to the hive. We're glad you're here."
