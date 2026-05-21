@@ -435,9 +435,9 @@ def _redact_db_url(url: str) -> str:
 
 @app.get("/debug/db")
 async def debug_db():
+    import config
     result: dict = {}
-    db_url = os.environ.get("NEON_DATABASE_URL") or os.environ.get("POSTGRES_URL", "")
-    result["database_url"] = _redact_db_url(db_url)
+    result["database_url"] = _redact_db_url(config.NEON_DATABASE_URL)
     try:
         from db.connection import get_conn
         with get_conn() as conn:
@@ -448,30 +448,30 @@ async def debug_db():
                 result["current_user"] = row[1]
                 result["inet_server_addr"] = row[2]
 
-                cur.execute("SELECT count(*) FROM welcome_video_jobs")
-                result["welcome_video_jobs_count"] = cur.fetchone()[0]
+                cur.execute("SELECT count(*), max(started_at) FROM jobs")
+                count, last = cur.fetchone()
+                result["jobs_count"] = count
+                result["jobs_max_started_at"] = last.isoformat() if last else None
 
                 cur.execute(
-                    "SELECT id, order_id, status, created_at, attempts, last_error, "
-                    "heygen_video_id, video_url, updated_at "
-                    "FROM welcome_video_jobs ORDER BY created_at DESC LIMIT 5"
+                    "SELECT id, job_name, status, trigger, started_at, finished_at, "
+                    "duration_ms, error "
+                    "FROM jobs ORDER BY started_at DESC LIMIT 5"
                 )
                 result["recent_jobs"] = [
                     {
                         "id": r[0],
-                        "order_id": r[1],
+                        "job_name": r[1],
                         "status": r[2],
-                        "created_at": r[3].isoformat() if r[3] else None,
-                        "attempts": r[4],
-                        "last_error": r[5],
-                        "heygen_video_id": r[6] if r[6] is not None else None,
-                        "video_url": r[7] if r[7] is not None else None,
-                        "updated_at": r[8].isoformat() if r[8] else None,
+                        "trigger": r[3],
+                        "started_at": r[4].isoformat() if r[4] else None,
+                        "finished_at": r[5].isoformat() if r[5] else None,
+                        "duration_ms": r[6],
+                        "error": r[7],
                     }
                     for r in cur.fetchall()
                 ]
     except Exception as e:
-        # psycopg errors can echo the full conninfo (incl. password) — strip any URL-like substring.
         import re
         msg = re.sub(r"postgres(?:ql)?://[^\s]+", "<redacted-db-url>", str(e))
         result["error"] = msg
