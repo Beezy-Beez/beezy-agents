@@ -105,7 +105,9 @@ _PAGE_TYPE: dict[str, str] = {
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _slug(title: str) -> str:
-    return "episode-" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    # No "episode-" prefix per beezy-sleep-story-page v2.0 (Task 5).
+    # 50-char length cap + DRY consolidation deferred to Task 5.5.
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
 
 
 # ── Sleep story page template (copied from the-bridge-of-incidents) ───────────
@@ -184,6 +186,7 @@ def _page_html_story(meta: dict[str, Any], page_url: str = "") -> str:
     script_text = (meta.get("script_text") or "").strip()
     embed_raw   = meta.get("buzzsprout_embed_url") or meta.get("buzzsprout_url") or ""
     cover_image = (meta.get("hero_image_url") or meta.get("cover_image_url") or "").strip()
+    eyebrow_text = meta.get("eyebrow") or "Sleep Better Podcast · A Beezy Beez story"
 
     dur_str = f"approximately {duration} minutes" if duration else "approximately 25 minutes"
     lead    = f"{dur_str.capitalize()}. {desc_short}" if desc_short else f"{dur_str.capitalize()}. Tonight's new story from the Sleep Better Podcast."
@@ -236,7 +239,7 @@ def _page_html_story(meta: dict[str, Any], page_url: str = "") -> str:
         _STORY_CSS + "\n\n"
         '<div class="sleep-story-page">\n'
         '  <div class="container">\n\n'
-        '    <p class="eyebrow">Sleep Better Podcast · A Beezy Beez story</p>\n\n'
+        f'    <p class="eyebrow">{eyebrow_text}</p>\n\n'
         f'    <h1>{title}</h1>\n\n'
         f'    <p class="lead">{lead}</p>\n\n'
         + hero_html
@@ -373,147 +376,22 @@ _TRANSCRIPT_META: dict[str, str] = {
 
 
 def _page_html_meditation(meta: dict[str, Any], page_url: str = "") -> str:
-    """Meditation/soundscape page — exact structure of sleep-meditation-track-1."""
-    import json as _json
+    """Meditations/soundscapes now render through the Bridge v1.0 template.
 
-    title        = meta.get("title", "")
+    beezy-sleep-story-page v2.0: stories AND meditations share one template.
+    This wrapper only computes the type-aware eyebrow (e.g. "Sleep Better
+    Podcast · Guided Sleep Meditation · 12 min") and delegates rendering
+    to _page_html_story. The v1.1 meditation template emitted forbidden
+    patterns (transcript section, hm-gate, library breadcrumbs) and was
+    retired 2026-05-21.
+    """
     episode_type = meta.get("episode_type", "guided_meditation")
-    duration     = meta.get("duration_minutes")
-    desc_short   = (meta.get("description_short") or "").strip()
-    desc_long    = (meta.get("description_long") or desc_short).strip()
-    embed_raw    = meta.get("buzzsprout_embed_url") or meta.get("buzzsprout_url") or ""
-    script_text  = (meta.get("script_text") or "").strip()
-
-    label         = _EPISODE_LABELS.get(episode_type, episode_type.replace("_", " ").title())
-    dur_str       = f" · {duration} min" if duration else ""
-    # Eyebrow: "Sleep Better Podcast · <type label> · <duration>" — NOT the title
-    eyebrow       = f"Sleep Better Podcast · {label}{dur_str}"
-
-    hub_label, hub_url, crumb_label = _CRUMB_CONFIG.get(
-        episode_type,
-        ("Sleep Science", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub", label),
-    )
-    back_label, back_url = _BACK_CONFIG.get(
-        episode_type,
-        ("the Sleep Science Hub", f"{_SHOPIFY_DOMAIN}/pages/sleep-science-hub"),
-    )
-    transcript_meta = _TRANSCRIPT_META.get(episode_type, "Full transcript, lightly edited for readability.")
-    about_label = _ABOUT_LABEL.get(episode_type, label.lower())
-
-    # Buzzsprout embed — small_player params as on the live page
-    embed_src = _buzzsprout_embed_src(embed_raw, player="small")
-
-    iframe_title = f"Sleep Better Podcast - {label} - {title}"
-    _ep_match = re.search(r"/episodes/(\d+)", embed_raw)
-    mp3_url = (
-        f"https://www.buzzsprout.com/2292260/episodes/{_ep_match.group(1)}.mp3"
-        if _ep_match else ""
-    )
-
-    # About paragraphs
-    about_paras = [p.strip() for p in desc_long.split("\n\n") if p.strip()]
-    about_html  = "\n".join(f"<p>{p}</p>" for p in about_paras) if about_paras else f"<p>{desc_short}</p>"
-
-    # Transcript paragraphs
-    if script_text:
-        t_paras = [p.strip() for p in script_text.split("\n\n") if p.strip()]
-        if len(t_paras) <= 1:
-            t_paras = [p.strip() for p in script_text.split("\n") if p.strip()]
-        transcript_html = "\n".join(f"<p>{p}</p>" for p in t_paras)
-    else:
-        transcript_html = "<p>Transcript coming soon.</p>"
-
-    # JSON-LD
-    dur_iso = f"PT{duration}M" if duration else ""
-    jsonld_episode = _json.dumps({
-        "@context": "https://schema.org",
-        "@type": "PodcastEpisode",
-        "name": title,
-        "description": desc_short or desc_long,
-        "url": page_url,
-        "duration": dur_iso,
-        "inLanguage": "en-US",
-        "associatedMedia": {
-            "@type": "AudioObject",
-            "contentUrl": mp3_url,
-            "encodingFormat": "audio/mpeg",
-        } if mp3_url else {},
-        "partOfSeries": {
-            "@type": "PodcastSeries",
-            "name": "Sleep Better Podcast",
-            "url": "https://deepbearsleep.com",
-            "publisher": {"@type": "Organization", "name": "Beezy Beez", "url": _SHOPIFY_DOMAIN},
-        },
-        "publisher": {
-            "@type": "Organization",
-            "name": "Beezy Beez",
-            "url": _SHOPIFY_DOMAIN,
-            "logo": {"@type": "ImageObject",
-                     "url": "https://cdn05.zipify.com/SgNn6ZTj7JLGAGruNGAZ7U0KjAY=/fit-in/3840x0/a9688067ccf748cc883f028b3e876c98/beezy-beez-logo.webp"},
-        },
-    }, ensure_ascii=False)
-    jsonld_breadcrumb = _json.dumps({
-        "@context": "https://schema.org",
-        "@type": "BreadcrumbList",
-        "itemListElement": [
-            {"@type": "ListItem", "position": 1, "name": "Home", "item": f"{_SHOPIFY_DOMAIN}/"},
-            {"@type": "ListItem", "position": 2, "name": hub_label, "item": hub_url},
-            {"@type": "ListItem", "position": 3, "name": title, "item": page_url},
-        ],
-    }, ensure_ascii=False)
-
-    parts = [
-        _EPIS_CSS,
-        _EPIS_FONTS,
-        '<article class="epis-page"><div class="epis-wrap">',
-        f'<nav class="epis-crumb" aria-label="Breadcrumb">'
-        f'<a href="{_SHOPIFY_DOMAIN}/">Home</a>'
-        f' <span class="sep">›</span> '
-        f'<a href="{hub_url}">{hub_label}</a>'
-        f' <span class="sep">›</span> {crumb_label}</nav>',
-        f'<div class="epis-hero" role="banner">'
-        f'<p class="epis-eyebrow">{eyebrow}</p>'
-        f'<h1 class="epis-h1">{title}</h1>'
-        f'<p class="epis-dek">{desc_short}</p>'
-        f'</div>',
-        f'<section class="epis-audio"><p class="epis-audio-label">Listen</p>'
-        + (
-            f'<iframe src="{embed_src}" loading="lazy" width="100%" height="200" '
-            f'frameborder="0" scrolling="no" title="{iframe_title}"></iframe>'
-            if embed_src else
-            '<p style="font-size:16px;color:#6b5947;font-style:italic;">Audio coming soon — bookmark this page or return from your email link.</p>'
-        )
-        + f'<p class="epis-audio-fallback">Player not loading? '
-          f'<a href="https://www.buzzsprout.com/2292260" target="_blank" rel="noopener">Listen on Buzzsprout</a>, '
-          f'<a href="https://podcasts.apple.com/podcast/id1722583143" target="_blank" rel="noopener">Apple Podcasts</a>, or '
-          f'<a href="https://open.spotify.com/show/45Y1QPOOMiAhAWjAREkTkZ" target="_blank" rel="noopener">Spotify</a>.</p>'
-          f'</section>',
-        f'<section class="epis-section"><h2 class="epis-h2">About this {about_label}</h2>'
-        f'{about_html}</section>',
-        f'<section class="epis-transcript" aria-labelledby="epis-transcript-h">'
-        f'<h2 id="epis-transcript-h" class="epis-h2">Transcript</h2>'
-        f'<p class="epis-transcript-meta">{transcript_meta}</p>'
-        f'<div class="epis-transcript-body">{transcript_html}</div></section>',
-        f'<section class="epis-context"><h2 class="epis-h2">About Beezy Beez</h2>'
-        f'<p>This {label.lower()} comes from the Sleep Better Podcast, produced by <strong>Beezy Beez</strong> — '
-        f'a small wellness brand making botanical extract honey for women navigating sleep changes after 50.</p>'
-        f'<p>If a teaspoon of honey before bed is part of your wind-down, our '
-        f'<a href="{_SHOPIFY_DOMAIN}/products/honey-sub">Botanical Extract Infused Honey</a> '
-        f'is what we make for exactly that moment.</p></section>',
-        _EPIS_PRODUCT_CTA,
-    ]
-
-    # Cookie-gated subscribe section: form (no cookie) or full issue library (cookie set)
-    from lib.hm_gate import build_gate_episode
-    parts.append(build_gate_episode())
-
-    parts += [
-        f'<p class="epis-back">← <a href="{back_url}">Back to {back_label}</a></p>',
-        '</div></article>',
-        f'<script type="application/ld+json">{jsonld_episode}</script>',
-        f'<script type="application/ld+json">{jsonld_breadcrumb}</script>',
-    ]
-    return "\n".join(parts)
+    if not meta.get("eyebrow"):
+        label = _EPISODE_LABELS.get(episode_type, episode_type.replace("_", " ").title())
+        duration = meta.get("duration_minutes")
+        dur_str = f" · {duration} min" if duration else ""
+        meta = {**meta, "eyebrow": f"Sleep Better Podcast · {label}{dur_str}"}
+    return _page_html_story(meta, page_url)
 
 
 def _build_page_html(meta: dict[str, Any], page_url: str = "") -> str:
@@ -805,8 +683,23 @@ def _deploy_pre_produced(slot: dict[str, Any], meta: dict[str, Any]) -> dict[str
 
     # ── 1. Shopify page (isPublished=True) ────────────────────────────────
     try:
+        from lib.sleep_audio_page_validator import validate_page, format_failure_slack
         from workers.shopify_publisher import create_page
         body_html = _build_page_html(meta, page_url=page_url)
+
+        # v2.0 template gate — blocks broken templates from reaching Shopify (Task 5).
+        v_result = validate_page(body_html, page_slug)
+        if not v_result.passed:
+            v_title, v_body = format_failure_slack(title, v_result)
+            notify_failure("episode_deployer/page_validation", v_body)
+            print(f"[episode_deployer] PAGE VALIDATION FAILED — aborting publish")
+            for v in v_result.forbidden_violations: print(f"  forbidden: {v}")
+            for v in v_result.missing_required:    print(f"  missing:   {v}")
+            for v in v_result.handle_violations:   print(f"  handle:    {v}")
+            _save_episode(meta, page_url, None, None)
+            return {"campaign_id": None,
+                    "notes": f"blocked:page_failed_validation:{v_result.summary()}"}
+
         page_result = create_page(
             title=title,
             body_html=body_html,

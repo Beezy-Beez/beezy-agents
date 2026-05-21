@@ -719,3 +719,20 @@ Once all checked, post to `#beezy-agents` Slack:
 **Fix:** Calendar autofill should generate ONE slot per episode with audience='sleep_audio' (or 'both', or null). Deployer's audience-rotation logic decides which (if any) audience actually gets the email.
 
 **Why deferred:** Task 4's rotation fix neutralizes the double-deploy risk operationally. Refactoring slot generation is its own concern.
+
+---
+
+## Task 5.5: DRY `_slug()` + enforce 50-char handle cap
+
+**Status:** Deferred per Alan on 2026-05-21. Surface after Task 8.
+
+**Bug:**
+- `_slug()` is duplicated in `workers/episode_deployer.py:107` and `workers/sleep_audio_producer.py:41`. Two near-identical 2-line functions that must stay in sync.
+- Task 5's validator enforces a 50-char handle cap, but `_slug()` has no truncation logic. Titles ≥51 chars (after slugification) will fail validation. Currently no episode has hit this — but the safety net should be in the generator, not just the validator.
+
+**Fix:**
+- Hoist `_slug()` to `lib/page_slug.py` (or similar). Single source of truth.
+- Add `[:50].rstrip("-")` truncation so generated handles never exceed 50 chars and don't end with a stray dash.
+- Update both deployer + producer to `from lib.page_slug import slug`.
+
+**Why deferred:** Task 5's minimal prefix-strip fix unblocks the validator. DRY consolidation + truncation is a follow-up cleanup with no operational urgency (no current episode title is long enough to trip the 50-char cap).

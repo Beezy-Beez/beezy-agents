@@ -39,7 +39,9 @@ _EPISODE_LABELS = {
 }
 
 def _slug(title: str) -> str:
-    return "episode-" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    # No "episode-" prefix per beezy-sleep-story-page v2.0 (Task 5).
+    # 50-char length cap + DRY consolidation deferred to Task 5.5.
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
 
 
 def _save_stub_and_update_hubs(episode_meta: dict) -> str:
@@ -152,6 +154,8 @@ def run_sleep_audio_slot(slot: dict) -> str:
     page_slug = _slug(title)
     page_url  = f"{_SHOPIFY_DOMAIN}/pages/{page_slug}"
     try:
+        from lib.sleep_audio_page_validator import validate_page, format_failure_slack
+        from lib.slack import notify_failure
         from workers.shopify_publisher import create_page
         from workers.episode_deployer import _build_page_html
         _page_meta = {
@@ -164,9 +168,19 @@ def run_sleep_audio_slot(slot: dict) -> str:
             "buzzsprout_url":    None,
             "script_text":       script,
         }
+        body_html = _build_page_html(_page_meta, page_url)
+
+        # v2.0 template gate — blocks broken templates from reaching Shopify (Task 5).
+        v_result = validate_page(body_html, page_slug)
+        if not v_result.passed:
+            v_title, v_body = format_failure_slack(title, v_result)
+            notify_failure("sleep_audio_producer/page_validation", v_body)
+            print(f"[sleep_audio] PAGE VALIDATION FAILED — aborting publish ({v_result.summary()})")
+            raise RuntimeError(f"page validation failed: {v_result.summary()}")
+
         result   = create_page(
             title=title,
-            body_html=_build_page_html(_page_meta, page_url),
+            body_html=body_html,
             handle=page_slug,
             seo_description=(description_short[:155] if description_short else None),
             is_published=True,
