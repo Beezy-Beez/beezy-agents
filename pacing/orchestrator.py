@@ -342,7 +342,11 @@ def run_daily():
                 elif isinstance(notes, dict) and notes.get("campaign_id"):
                     klaviyo_id = notes["campaign_id"]
                 if isinstance(notes, dict):
-                    notes = "klaviyo_draft:" + notes.get("campaign_id", "?")
+                    # Handler-provided notes win; otherwise fall back to legacy klaviyo_draft:{id} shape
+                    if notes.get("notes"):
+                        notes = notes["notes"]
+                    else:
+                        notes = "klaviyo_draft:" + notes.get("campaign_id", "?")
                 notes = notes or ""
 
                 # A clean validator block or intentional skip is NOT a failure.

@@ -707,3 +707,15 @@ Once all checked, post to `#beezy-agents` Slack:
 - Recency audit stays email-only (SMS uses Smart Sending and different cadence rules)
 
 **Why deferred:** Calendar generation governs email campaigns. SMS strategy is governed separately (different cadence, copy length, opt-in management). Email-only snapshot is sufficient for Tasks 2-7. Adding SMS now would expand scope without immediate calendar-quality benefit.
+
+---
+
+## Task 4.5: Sleep audio slot generation — single slot per episode
+
+**Status:** Deferred per Alan on 2026-05-21. Surface after Task 8.
+
+**Bug:** `pacing/calendar.py:1041-1054` autofill generates 2 calendar_executions slots per sleep audio episode (one per audience). Orchestrator dedupe key (orchestrator.py:81-89) includes audience, so both fire `_handle_sleep_audio`. The deployer's `_deploy_pre_produced` ignores slot.audience and creates campaigns for both audiences regardless. With Task 4's rotation check, the second firing finds both audiences in cooldown and skips — bug is masked but not fixed.
+
+**Fix:** Calendar autofill should generate ONE slot per episode with audience='sleep_audio' (or 'both', or null). Deployer's audience-rotation logic decides which (if any) audience actually gets the email.
+
+**Why deferred:** Task 4's rotation fix neutralizes the double-deploy risk operationally. Refactoring slot generation is its own concern.

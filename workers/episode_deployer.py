@@ -546,6 +546,59 @@ def _create_klaviyo_draft(
     return camp_id
 
 
+# ── Audience rotation (beezy-episode-deployer v1.5) ───────────────────────────
+
+# Per-audience min days since last sleep_audio send. Older than this → eligible.
+# Engaged Customers ≥7d (target 7-10), Active Seal ≥5d. Locked 2026-05-21.
+_ROTATION_THRESHOLDS = {"engaged_customers": 7, "active_seal": 5}
+
+
+def _sleep_audio_eligible_audiences(today: date) -> dict[str, int]:
+    """Per beezy-episode-deployer v1.5 audience rotation rule.
+
+    Returns {audience: days_since_last_send} for audiences whose last
+    sleep_audio send is older than their per-audience threshold.
+    Empty dict → neither eligible → page publishes but email is skipped.
+
+    On DB failure, defaults to dual-send (sentinel 9999) — safer than silently
+    suppressing a real episode email because of a transient DB blip.
+    """
+    eligible: dict[str, int] = {}
+    try:
+        with psycopg.connect(NEON_DATABASE_URL) as conn:
+            for audience, threshold in _ROTATION_THRESHOLDS.items():
+                row = conn.execute(
+                    "SELECT MAX(slot_date) FROM calendar_executions "
+                    "WHERE audience = %s AND content_type = 'sleep_audio' "
+                    "AND status IN ('dispatched','completed')",
+                    (audience,)
+                ).fetchone()
+                last_date = row[0] if row and row[0] else None
+                days = (today - last_date).days if last_date else 9999
+                if days >= threshold:
+                    eligible[audience] = days
+    except Exception as exc:
+        print(f"[episode_deployer] rotation lookup failed ({exc}) — defaulting to dual-send")
+        return {"engaged_customers": 9999, "active_seal": 9999}
+    return eligible
+
+
+def _days_since_last_sleep_audio(today: date, audience: str) -> int:
+    """Days since last sleep_audio send to this audience (9999 if never)."""
+    try:
+        with psycopg.connect(NEON_DATABASE_URL) as conn:
+            row = conn.execute(
+                "SELECT MAX(slot_date) FROM calendar_executions "
+                "WHERE audience = %s AND content_type = 'sleep_audio' "
+                "AND status IN ('dispatched','completed')",
+                (audience,)
+            ).fetchone()
+        last_date = row[0] if row and row[0] else None
+        return (today - last_date).days if last_date else 9999
+    except Exception:
+        return 9999
+
+
 def _parse_meta(slot: dict[str, Any]) -> dict[str, Any] | None:
     """Extract episode metadata from slot["notes"]. Returns None if absent/invalid."""
     raw = slot.get("notes")
@@ -563,7 +616,7 @@ def _parse_meta(slot: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _save_episode(meta: dict[str, Any], page_url: str,
-                  camp_a_id: str, camp_b_id: str) -> None:
+                  camp_a_id: str | None, camp_b_id: str | None) -> None:
     """Upsert episode row to episodes table."""
     episode_id = meta.get("episode_id") or f"ep_{uuid.uuid4().hex[:10]}"
     try:
@@ -824,50 +877,127 @@ def _deploy_pre_produced(slot: dict[str, Any], meta: dict[str, Any]) -> dict[str
     subj_a = _SUBJECT_A.get(episode_type, f"Tonight: {title}")
     subj_b = _SUBJECT_B.get(episode_type, f"New {label}: {title}")
 
-    print(f"[episode_deployer] Creating Klaviyo campaign A (Engaged Customers)...")
-    camp_a_id = _create_klaviyo_draft(
-        html=email_a_html,
-        name=f"{camp_name_base} | Engaged Customers",
-        subject=subj_a,
-        segment_ids=[_ENGAGED_CUSTOMERS],
-        excluded_ids=[_ACTIVE_SEAL],
-    )
-    print(f"[episode_deployer]   campaign_a: {camp_a_id}")
+    # Audience rotation gate — check per-audience cooldown before each send.
+    # beezy-episode-deployer v1.5: engaged_customers ≥7d, active_seal ≥5d.
+    try:
+        today_d = date.fromisoformat(slot_date) if isinstance(slot_date, str) else date.today()
+    except ValueError:
+        today_d = date.today()
+    eligible = _sleep_audio_eligible_audiences(today_d)
+    days_engaged = eligible.get("engaged_customers")
+    if days_engaged is None:
+        days_engaged = _days_since_last_sleep_audio(today_d, "engaged_customers")
+    days_active = eligible.get("active_seal")
+    if days_active is None:
+        days_active = _days_since_last_sleep_audio(today_d, "active_seal")
 
-    print(f"[episode_deployer] Creating Klaviyo campaign B (Active Seal)...")
-    camp_b_id = _create_klaviyo_draft(
-        html=email_b_html,
-        name=f"{camp_name_base} | Active Seal",
-        subject=subj_b,
-        segment_ids=[_ACTIVE_SEAL],
-    )
-    print(f"[episode_deployer]   campaign_b: {camp_b_id}")
+    camp_a_id: str | None = None
+    camp_b_id: str | None = None
+
+    if "engaged_customers" in eligible:
+        print(f"[episode_deployer] Creating Klaviyo campaign A (Engaged Customers, last {days_engaged}d ago)...")
+        camp_a_id = _create_klaviyo_draft(
+            html=email_a_html,
+            name=f"{camp_name_base} | Engaged Customers",
+            subject=subj_a,
+            segment_ids=[_ENGAGED_CUSTOMERS],
+            excluded_ids=[_ACTIVE_SEAL],
+        )
+        print(f"[episode_deployer]   campaign_a: {camp_a_id}")
+    else:
+        print(f"[episode_deployer] Skipping Engaged Customers (last {days_engaged}d ago, threshold 7d)")
+
+    if "active_seal" in eligible:
+        print(f"[episode_deployer] Creating Klaviyo campaign B (Active Seal, last {days_active}d ago)...")
+        camp_b_id = _create_klaviyo_draft(
+            html=email_b_html,
+            name=f"{camp_name_base} | Active Seal",
+            subject=subj_b,
+            segment_ids=[_ACTIVE_SEAL],
+        )
+        print(f"[episode_deployer]   campaign_b: {camp_b_id}")
+    else:
+        print(f"[episode_deployer] Skipping Active Seal (last {days_active}d ago, threshold 5d)")
 
     # ── 5. Save episode to DB ─────────────────────────────────────────────
     _save_episode(meta, page_url, camp_a_id, camp_b_id)
 
-    # ── 6. Slack notification ─────────────────────────────────────────────
-    admin_a = f"https://www.klaviyo.com/campaign/{camp_a_id}/wizard"
-    admin_b = f"https://www.klaviyo.com/campaign/{camp_b_id}/wizard"
-    post_draft(
-        title=f"Episode deployed: {title}",
-        summary_lines=[
-            f"*Title:* {title}",
-            f"*Type:* {label}",
-            f"*Page:* {page_url}",
-            f"*Email A (Engaged Customers):* {admin_a}",
-            f"*Email B (Active Seal):* {admin_b}",
-            "Ready for Boris review.",
-        ],
-        body=(
-            f"Klaviyo A: {admin_a}\n"
-            f"Klaviyo B: {admin_b}\n\n"
-            f"Both campaigns are DRAFT — review subject lines, then schedule "
-            f"Email A for 8:00pm ET and Email B for 8:15pm ET."
-        ),
-        image_url=meta.get("hero_image_url") or meta.get("cover_image_url") or None,
-        image_alt=title,
-    )
+    # ── 6. Slack notification — branches on rotation outcome ──────────────
+    sent_to_engaged = camp_a_id is not None
+    sent_to_active  = camp_b_id is not None
+    if sent_to_engaged and sent_to_active:
+        admin_a = f"https://www.klaviyo.com/campaign/{camp_a_id}/wizard"
+        admin_b = f"https://www.klaviyo.com/campaign/{camp_b_id}/wizard"
+        post_draft(
+            title=f"Episode deployed: {title}",
+            summary_lines=[
+                f"*Title:* {title}",
+                f"*Type:* {label}",
+                f"*Page:* {page_url}",
+                f"*Email A (Engaged Customers):* {admin_a}",
+                f"*Email B (Active Seal):* {admin_b}",
+                "Ready for Boris review.",
+            ],
+            body=(
+                f"Klaviyo A: {admin_a}\n"
+                f"Klaviyo B: {admin_b}\n\n"
+                f"Both campaigns are DRAFT — review subject lines, then schedule "
+                f"Email A for 8:00pm ET and Email B for 8:15pm ET."
+            ),
+            image_url=meta.get("hero_image_url") or meta.get("cover_image_url") or None,
+            image_alt=title,
+        )
+    elif sent_to_engaged:
+        admin_a = f"https://www.klaviyo.com/campaign/{camp_a_id}/wizard"
+        post_draft(
+            title=f"Episode deployed: {title}",
+            summary_lines=[f"*Title:* {title}", f"*Type:* {label}"],
+            body=(
+                f"📄 Episode page live: {page_url}\n"
+                f"📧 Email sent → Engaged Customers\n"
+                f"⏭️ Active Seal skipped (last sent {days_active}d ago, threshold 5d)\n\n"
+                f"Klaviyo A: {admin_a}"
+            ),
+            image_url=meta.get("hero_image_url") or meta.get("cover_image_url") or None,
+            image_alt=title,
+        )
+    elif sent_to_active:
+        admin_b = f"https://www.klaviyo.com/campaign/{camp_b_id}/wizard"
+        post_draft(
+            title=f"Episode deployed: {title}",
+            summary_lines=[f"*Title:* {title}", f"*Type:* {label}"],
+            body=(
+                f"📄 Episode page live: {page_url}\n"
+                f"📧 Email sent → Active Seal\n"
+                f"⏭️ Engaged Customers skipped (last sent {days_engaged}d ago, threshold 7d)\n\n"
+                f"Klaviyo B: {admin_b}"
+            ),
+            image_url=meta.get("hero_image_url") or meta.get("cover_image_url") or None,
+            image_alt=title,
+        )
+    else:
+        post_draft(
+            title=f"Episode deployed (page only): {title}",
+            summary_lines=[f"*Title:* {title}", f"*Type:* {label}"],
+            body=(
+                f"📄 Episode page live: {page_url}\n"
+                f"⏭️ Email skipped — both audiences within cooldown window "
+                f"(engaged: {days_engaged}d ago, active_seal: {days_active}d ago)"
+            ),
+            image_url=meta.get("hero_image_url") or meta.get("cover_image_url") or None,
+            image_alt=title,
+        )
     print(f"[episode_deployer] Slack posted")
 
-    return {"campaign_id": camp_a_id}
+    # Return value drives orchestrator's calendar_executions write.
+    # campaign_id: first non-null (preserves the JOIN at publish_and_index.py:120).
+    # notes: machine-readable rotation outcome — orchestrator now prefers handler notes.
+    if sent_to_engaged and sent_to_active:
+        rotation_notes = "dual_send"
+    elif sent_to_engaged:
+        rotation_notes = "partial_send:sent_to=engaged_customers,skipped=active_seal"
+    elif sent_to_active:
+        rotation_notes = "partial_send:sent_to=active_seal,skipped=engaged_customers"
+    else:
+        rotation_notes = f"email_skipped:rotation_window:engaged={days_engaged}d,active_seal={days_active}d"
+    return {"campaign_id": camp_a_id or camp_b_id, "notes": rotation_notes}
