@@ -1,7 +1,7 @@
 modules = ["nodejs-24", "python-3.11"]
 
 [deployment]
-deploymentTarget = "cloudrun"
+deploymentTarget = "gce"
 run = ["python", "scripts/cron_dispatch.py"]
 
 [workflows]
