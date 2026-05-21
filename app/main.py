@@ -232,8 +232,10 @@ def _run_cron_jobs(now: datetime) -> None:
         except Exception as e:
             print(f"[cron] watchdog error: {e}")
 
-    # Morning briefing — 8:05am daily
-    if h == 8 and m == 5:
+    # Morning briefing — 8:15am ET (moved off 8:05 because the orchestrator at
+    # 8:00 ET routinely takes 7+ minutes and steamrolled the 8:05 tick — see
+    # CLAUDE.md current-state notes).
+    if h == 8 and m == 15:
         if _try_claim_today("cron_morning_brief"):
             try:
                 with run_job("cron_morning_brief", trigger="cron") as job:  # claim-gated
@@ -243,10 +245,10 @@ def _run_cron_jobs(now: datetime) -> None:
             except Exception as e:
                 print(f"[cron] morning brief error: {e}")
 
-    # Publish pages + update index pages — 8:05am ET (right after orchestrator)
+    # Publish pages + update index pages — 8:15am ET (same reason as above).
     # Adds new Hive Mind issues to the archive + SSH_FEATURED, adds episodes to library.
     # Idempotent — skips anything already up-to-date.
-    if h == 8 and m == 5:
+    if h == 8 and m == 15:
         if _try_claim_today("cron_publish_and_index"):
             try:
                 with run_job("cron_publish_and_index", trigger="cron") as job:  # claim-gated

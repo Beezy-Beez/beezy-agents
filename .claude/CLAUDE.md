@@ -162,8 +162,8 @@ every tick its time gate matches.
 | `h==7, m==35` | pacing cache refresh | `workers.pacing_cache.refresh_pacing_cache` | none |
 | `h==7, m==40` | audience health | `workers.audience_health.run_audience_health` | `cron_audience_health` |
 | `h==8 or (h==9,m==0)` | orchestrator (sole campaign dispatcher) | `pacing.orchestrator.run_daily` | `cron_orchestrator` |
-| `h==8, m==5` | morning brief | `workers.morning_brief.run_morning_brief` | `cron_morning_brief` |
-| `h==8, m==5` | publish + index | `workers.publish_and_index.run` | `cron_publish_and_index` |
+| `h==8, m==15` | morning brief | `workers.morning_brief.run_morning_brief` | `cron_morning_brief` |
+| `h==8, m==15` | publish + index | `workers.publish_and_index.run` | `cron_publish_and_index` |
 | `h==9, m==0` | revenue backfill | `workers.revenue_backfill.run_backfill` | none |
 | `day==last_day-7, h==9, m==0` | next month's calendar | `pacing.calendar.run_monthly` | none |
 | `day==15, h==9, m==30` | bi-weekly pacing check | `workers.learning_loop.run_biweekly` | none |
@@ -203,8 +203,8 @@ row for them is actionable.
 | `cron_orchestrator` | claim | `h==8 or (h==9,m==0)` |
 | `cron_audience_health` | claim | `h==7, m==40` |
 | `pacing_cache_refresh` | time | `h==7, m==35` |
-| `cron_morning_brief` | claim | `h==8, m==5` |
-| `cron_publish_and_index` | claim | `h==8, m==5` |
+| `cron_morning_brief` | claim | `h==8, m==15` |
+| `cron_publish_and_index` | claim | `h==8, m==15` |
 | `revenue_backfill` | time | `h==9, m==0` |
 | `calendar_generation` | time | `day==last_day-7, h==9, m==0` |
 | `learning_loop_biweekly` | time | `day==15, h==9, m==30` |
@@ -396,7 +396,7 @@ without touching any worker. Do not add `run_job` inside individual workers.
 ### Step 4 — `workers/watchdog.py`
 
 Runs on a cron tick. Holds an expected-schedule dict
-(`publish_and_index` daily ~08:05, `ingestion_sync` every 4h, `weekly_brief`
+(`publish_and_index` daily ~08:15, `ingestion_sync` every 4h, `weekly_brief`
 Sun 21:00, etc.). For each job, alert Slack on any of:
 
 1. **Overdue** — no `succeeded` run within cadence + a grace window

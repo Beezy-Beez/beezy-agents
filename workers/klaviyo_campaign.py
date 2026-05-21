@@ -29,14 +29,35 @@ Required env vars:
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 
 import httpx
 import psycopg
 
 from config import NEON_DATABASE_URL
+from db.connection import get_conn
 from lib.email_builder import build_email_html
 from lib.slack import post_draft, notify_failure
+
+
+def _fetch_pending_numbers(sql: str, retries: int = 3) -> list[tuple]:
+    """Read pending-issue rows with retry on transient Neon connection errors.
+
+    A bare connect() at the start of auto_create_pending was killing the whole
+    hourly run on DNS blips (see jobs row id=22, 2026-05-20 14:00 UTC).
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            with get_conn() as conn:
+                return conn.execute(sql).fetchall()
+        except psycopg.OperationalError as e:
+            if attempt == retries:
+                raise
+            backoff = min(2 ** attempt, 15)
+            print(f"[auto_create] Neon connect error (attempt {attempt}/{retries}): {e} — retrying in {backoff}s")
+            time.sleep(backoff)
+    return []  # unreachable, but keeps the type-checker happy
 
 from config import KLAVIYO_REVISION
 KLAVIYO_BASE = "https://a.klaviyo.com/api"
@@ -297,18 +318,17 @@ def auto_create_pending() -> str:
     Returns a short summary string for logging.
     """
     # ── Phase 1: create missing Shopify pages ──────────────────────────────
-    with psycopg.connect(NEON_DATABASE_URL) as conn:
-        page_rows = conn.execute(
-            """
-            SELECT number FROM issues
-            WHERE status = 'draft'
-              AND shopify_page_id IS NULL
-              AND page_title IS NOT NULL
-              AND long_form_body IS NOT NULL
-              AND cover_image_url IS NOT NULL
-            ORDER BY number ASC LIMIT 5
-            """
-        ).fetchall()
+    page_rows = _fetch_pending_numbers(
+        """
+        SELECT number FROM issues
+        WHERE status = 'draft'
+          AND shopify_page_id IS NULL
+          AND page_title IS NOT NULL
+          AND long_form_body IS NOT NULL
+          AND cover_image_url IS NOT NULL
+        ORDER BY number ASC LIMIT 5
+        """
+    )
 
     page_results: list[str] = []
     for (number,) in page_rows:
@@ -325,10 +345,9 @@ def auto_create_pending() -> str:
         print("[auto_create] Page creation:\n" + "\n".join(page_results))
 
     # ── Phase 2: create Klaviyo campaigns for issues with pages ────────────
-    with psycopg.connect(NEON_DATABASE_URL) as conn:
-        campaign_rows = conn.execute(
-            "SELECT number FROM issues WHERE status = 'draft' AND shopify_page_id IS NOT NULL AND klaviyo_campaign_id IS NULL ORDER BY number ASC LIMIT 5"
-        ).fetchall()
+    campaign_rows = _fetch_pending_numbers(
+        "SELECT number FROM issues WHERE status = 'draft' AND shopify_page_id IS NOT NULL AND klaviyo_campaign_id IS NULL ORDER BY number ASC LIMIT 5"
+    )
 
     if not campaign_rows:
         if not page_results:
