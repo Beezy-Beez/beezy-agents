@@ -61,3 +61,4 @@ venv/
 
 # Claude Code per-user state (team-shared .claude/ files are fine to commit)
 .claude/settings.local.json
+pacing/snapshots/
