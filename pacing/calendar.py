@@ -253,6 +253,8 @@ def _build_context(month_start: date) -> str:
             "LOW: lapsed_90_180d MAX 1x/mo ($190/send). NO gummies-to-niche or cold blasts. "
             "If pacing behind mid-month, increase VIP/lapsed_30d/active_seal first — never lapsed_90_180d. "
             "MANDATORY: hive_mind every 3 days, sleep_audio every 3 days alternating. "
+            # Members & Subs cadence widened from 3d to 5-7d on 2026-05-21 — improves audience freshness, reduces over-touch (see beezy-system v2.0 skill)
+            "MANDATORY: Members & Subscribers Newsletter (newsletter-format klaviyo_campaign to members_subscribers audience): every 5-7 days, target 6 days between sends. "
             "MANDATORY: cover EVERY day planning_period_first_day through planning_period_last_day."
         ),
     }
