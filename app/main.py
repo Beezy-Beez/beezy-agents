@@ -11,6 +11,12 @@ SINGLE SOURCE OF TRUTH FOR CAMPAIGN DISPATCH:
 Removed: workers.calendar_campaign_builder (was creating duplicate calendar
 plans and dispatching them independently, causing double-dispatch at 8am).
 """
+
+import socket, os
+hostname = socket.gethostname()
+deployment_type = os.environ.get("REPLIT_DEPLOYMENT", "unknown")
+print(f"[startup] host={hostname} deployment={deployment_type} pid={os.getpid()}")
+
 import sys
 import os
 import json
@@ -24,6 +30,8 @@ from fastapi.responses import JSONResponse
 from app.dashboard import router as dashboard_router
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+ENABLE_CRON = os.environ.get("ENABLE_CRON", "0") == "1"
 
 NY = ZoneInfo("America/New_York")
 _last_cron_minute = -1
@@ -365,12 +373,16 @@ async def _cron_loop():
 
 @asynccontextmanager
 async def lifespan(app):
-    slack_task = asyncio.create_task(_slack_loop())
-    cron_task = asyncio.create_task(_cron_loop())
-    print("[app] Started: Slack agent (5s) + cron jobs (time-gated)")
+    if ENABLE_CRON:
+        slack_task = asyncio.create_task(_slack_loop())
+        cron_task = asyncio.create_task(_cron_loop())
+        print("[app] ENABLE_CRON=1 — started Slack agent + cron loop")
+    else:
+        print("[app] ENABLE_CRON=0 — skipping Slack + cron loops (workspace mode)")
     yield
-    slack_task.cancel()
-    cron_task.cancel()
+    if ENABLE_CRON:
+        slack_task.cancel()
+        cron_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
