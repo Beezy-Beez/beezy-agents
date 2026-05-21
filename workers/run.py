@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 import psycopg
 
-from config import DATABASE_URL
+from config import NEON_DATABASE_URL
 from lib.slack import notify_failure, post_draft
 from workers.skill_runner import invoke_skill
 
@@ -371,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     state: dict[str, Any] = {}
 
     if args.skill == "hive_mind":
-        with psycopg.connect(DATABASE_URL) as conn:
+        with psycopg.connect(NEON_DATABASE_URL) as conn:
             state = _fetch_state(conn, target_issue=args.issue)
             target_issue_number = state["target_issue_number"]
 
@@ -454,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
         issue_number = issue_data.get("issue_number")
         if not args.no_save:
             try:
-                with psycopg.connect(DATABASE_URL) as conn:
+                with psycopg.connect(NEON_DATABASE_URL) as conn:
                     _insert_draft_issue(conn, issue_data, result.run_id, cover_image_url=None)
                 print(f"[run] saved draft to issues table (number={issue_number})")
             except Exception as e:
@@ -474,7 +474,7 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"[run] cover image: {cover_url}")
                     if not args.no_save:
                         try:
-                            with psycopg.connect(DATABASE_URL) as conn:
+                            with psycopg.connect(NEON_DATABASE_URL) as conn:
                                 _update_cover_image_only(conn, issue_number, cover_url)
                             print("[run] saved cover_image_url to issues table")
                         except Exception as e:

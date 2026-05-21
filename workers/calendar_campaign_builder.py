@@ -39,7 +39,7 @@ from typing import Any
 
 import psycopg
 
-from config import DATABASE_URL
+from config import NEON_DATABASE_URL
 from db.connection import get_conn
 from lib.dryrun import is_dry_run, dry_banner
 from lib.slack import post_draft, notify_failure
@@ -500,7 +500,7 @@ if __name__ == "__main__":
     import psycopg as _psycopg
 
     if args.inject_test_slot:
-        with _psycopg.connect(DATABASE_URL) as conn:
+        with _psycopg.connect(NEON_DATABASE_URL) as conn:
             # Fetch the current calendar decision_id (required NOT NULL)
             _did = conn.execute(
                 "SELECT id FROM decisions WHERE decision_type='calendar_plan' ORDER BY created_at DESC LIMIT 1"
@@ -532,10 +532,10 @@ if __name__ == "__main__":
             conn.commit()
         print("Test slot injected — run with --dry-run --build-only to test")
     elif args.seed_only:
-        with _psycopg.connect(DATABASE_URL) as conn:
+        with _psycopg.connect(NEON_DATABASE_URL) as conn:
             seed_approved_slots(conn, dry_run=args.dry_run, horizon_hours=args.horizon_hours)
     elif args.build_only:
-        with _psycopg.connect(DATABASE_URL) as conn:
+        with _psycopg.connect(NEON_DATABASE_URL) as conn:
             build_pending(conn, dry_run=args.dry_run, horizon_hours=args.horizon_hours)
     else:
         run(dry_run=args.dry_run)

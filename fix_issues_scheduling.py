@@ -27,7 +27,7 @@ sys.path.insert(0, ".")
 from datetime import date, datetime, timedelta, timezone
 
 import psycopg
-from config import DATABASE_URL
+from config import NEON_DATABASE_URL
 
 # ── Cadence -- MUST match the constants in workers/run.py ─────────────────────
 ANCHOR_ISSUE = 14
@@ -49,7 +49,7 @@ IMG_018 = ("https://d8j0ntlcm91z4.cloudfront.net/user_3D95Y4KmkeRJAvb6MGHFgJfBpI
 
 
 def main() -> int:
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(NEON_DATABASE_URL) as conn:
         # ── 1. Backfill scheduled_send_at on all existing issues ─────────────
         print("=== 1. Backfilling scheduled_send_at ===")
         nums = [r[0] for r in conn.execute(

@@ -20,7 +20,7 @@ import sys
 
 import psycopg
 
-from config import DATABASE_URL
+from config import NEON_DATABASE_URL
 from lib.email_builder import build_email_html
 from workers.klaviyo_campaign import create_campaign_for_issue
 
@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.dry_run:
-        with psycopg.connect(DATABASE_URL) as conn:
+        with psycopg.connect(NEON_DATABASE_URL) as conn:
             row = conn.execute(
                 "SELECT number, subject_line, preview_text, page_slug, email_teaser_body "
                 "FROM issues WHERE number = %s",

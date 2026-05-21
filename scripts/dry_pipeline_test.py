@@ -21,7 +21,7 @@ from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import psycopg
-from config import DATABASE_URL
+from config import NEON_DATABASE_URL
 
 
 PASS  = "PASS "
@@ -36,7 +36,7 @@ _test_decision_id: str = ""
 # ---- DB helpers ----
 
 def get_conn():
-    return psycopg.connect(DATABASE_URL)
+    return psycopg.connect(NEON_DATABASE_URL)
 
 
 def ensure_test_decision() -> str:

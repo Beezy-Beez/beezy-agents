@@ -24,7 +24,7 @@ from typing import Any, Optional
 import psycopg
 from anthropic import Anthropic
 
-from config import DATABASE_URL
+from config import NEON_DATABASE_URL
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -94,7 +94,7 @@ def _try_parse_json(text: str) -> Optional[dict[str, Any]]:
 def _log_run(result: SkillResult, context: dict[str, Any]) -> None:
     """Insert a row into the runs table. Best-effort; logs but doesn't raise on failure."""
     try:
-        with psycopg.connect(DATABASE_URL) as conn:
+        with psycopg.connect(NEON_DATABASE_URL) as conn:
             conn.execute(
                 """
                 insert into runs

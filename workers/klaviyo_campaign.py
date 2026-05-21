@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 import httpx
 import psycopg
 
-from config import DATABASE_URL
+from config import NEON_DATABASE_URL
 from lib.email_builder import build_email_html
 from lib.slack import post_draft, notify_failure
 
@@ -189,7 +189,7 @@ def _create_page_for_issue(issue_number: int) -> dict:
     from workers.shopify_publisher import create_page, upload_image_to_shopify
     from datetime import datetime, timezone
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(NEON_DATABASE_URL) as conn:
         row = conn.execute(
             """
             SELECT number, page_title, page_dek, page_breadcrumb_label,
@@ -242,7 +242,7 @@ def _create_page_for_issue(issue_number: int) -> dict:
         print(f"[page_create] Issue {number}: uploading cover image to Shopify CDN...")
         image_info = upload_image_to_shopify(cover_image_url, alt=alt)
         print(f"[page_create] Issue {number}: image_id={image_info['id']}")
-        with psycopg.connect(DATABASE_URL) as conn:
+        with psycopg.connect(NEON_DATABASE_URL) as conn:
             conn.execute(
                 "UPDATE issues SET shopify_image_id = %s, shopify_image_url = %s WHERE number = %s",
                 (image_info["id"], image_info["url"], number),
@@ -265,7 +265,7 @@ def _create_page_for_issue(issue_number: int) -> dict:
     )
     print(f"[page_create] Issue {number}: page_id={page_info['id']}  url={page_info['url']}")
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(NEON_DATABASE_URL) as conn:
         conn.execute(
             """
             UPDATE issues SET
@@ -297,7 +297,7 @@ def auto_create_pending() -> str:
     Returns a short summary string for logging.
     """
     # ── Phase 1: create missing Shopify pages ──────────────────────────────
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(NEON_DATABASE_URL) as conn:
         page_rows = conn.execute(
             """
             SELECT number FROM issues
@@ -325,7 +325,7 @@ def auto_create_pending() -> str:
         print("[auto_create] Page creation:\n" + "\n".join(page_results))
 
     # ── Phase 2: create Klaviyo campaigns for issues with pages ────────────
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(NEON_DATABASE_URL) as conn:
         campaign_rows = conn.execute(
             "SELECT number FROM issues WHERE status = 'draft' AND shopify_page_id IS NOT NULL AND klaviyo_campaign_id IS NULL ORDER BY number ASC LIMIT 5"
         ).fetchall()
@@ -366,7 +366,7 @@ def create_campaign_for_issue(issue_number: int) -> dict:
         raise RuntimeError("KLAVIYO_FROM_EMAIL is not set.")
     from_label = os.environ.get("KLAVIYO_FROM_NAME") or "Beezy Beez Honey"
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(NEON_DATABASE_URL) as conn:
         row = conn.execute(
             """
             SELECT number, status,
@@ -454,7 +454,7 @@ def create_campaign_for_issue(issue_number: int) -> dict:
     _assign_template(message_id=message_id, template_id=template_id)
 
     now = datetime.now(timezone.utc)
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(NEON_DATABASE_URL) as conn:
         conn.execute(
             """
             UPDATE issues

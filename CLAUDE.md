@@ -17,7 +17,7 @@ Python workers fired by a time-gated cron loop. This is deliberate — see
 *Design philosophy* below. Do not "agent-ify" the plumbing.
 
 - Host: Replit project `beezy-agents-ingestion`, working dir `~/workspace/`
-- DB: Neon Postgres via `DATABASE_URL`
+- DB: Neon Postgres via `NEON_DATABASE_URL`
 - Storage: Cloudflare R2
 - Stack: Python / FastAPI
 - Integrations: Klaviyo (REST), Shopify (Admin GraphQL), Higgsfield (REST), ElevenLabs, Slack
@@ -442,7 +442,7 @@ the cron loop as part of Step 3.
 - "Deploy" = the file is in `~/workspace`; the Replit web server picks it up.
   There is no separate build step.
 - Dry-test the pipeline with `scripts/dry_pipeline_test.py` before live runs.
-- Env vars available: `DATABASE_URL`, `BEEZY_ANTHROPIC_API_KEY`,
+- Env vars available: `NEON_DATABASE_URL`, `BEEZY_ANTHROPIC_API_KEY`,
   `KLAVIYO_API_KEY`, `KLAVIYO_FROM_EMAIL`, `SHOPIFY_ACCESS_TOKEN`,
   `SHOPIFY_SHOP_DOMAIN`, `HIGGSFIELD_API_KEY`, `HIGGSFIELD_SECRET`,
   `SLACK_BOT_TOKEN`, `SLACK_WEBHOOK_URL`, `NEW_EPISODES_CHANNEL_ID`,

@@ -417,12 +417,28 @@ async def first_order_webhook(request: Request):
     return {"status": "queued", "order_id": order_id}
 
 
+def _redact_db_url(url: str) -> str:
+    """Return a safe summary of a Postgres URL: scheme/user/host/db only — never the password."""
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        host = p.hostname or ""
+        db = (p.path or "").lstrip("/")
+        user = p.username or ""
+        scheme = p.scheme or "postgresql"
+        return f"{scheme}://{user}@{host}/{db}"
+    except Exception:
+        return "<unparseable>"
+
+
 @app.get("/debug/db")
 async def debug_db():
     result: dict = {}
+    db_url = os.environ.get("NEON_DATABASE_URL") or os.environ.get("POSTGRES_URL", "")
+    result["database_url"] = _redact_db_url(db_url)
     try:
-        result["database_url_prefix"] = (os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL", ""))[:80]
-
         from db.connection import get_conn
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -455,7 +471,10 @@ async def debug_db():
                     for r in cur.fetchall()
                 ]
     except Exception as e:
-        result["error"] = str(e)
+        # psycopg errors can echo the full conninfo (incl. password) — strip any URL-like substring.
+        import re
+        msg = re.sub(r"postgres(?:ql)?://[^\s]+", "<redacted-db-url>", str(e))
+        result["error"] = msg
     return result
 
 
@@ -512,7 +531,7 @@ def hive_mind_issues():
 def debug_pacing():
     """Diagnose pacing data in the deployed container."""
     import json, os
-    result = {"database_url_set": bool(os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")),
+    result = {"database_url_set": bool(os.environ.get("NEON_DATABASE_URL") or os.environ.get("POSTGRES_URL")),
               "error": None, "raw_value": None, "parsed": None}
     try:
         from db.connection import get_conn
@@ -1022,7 +1041,7 @@ def api_data_system():
         cron_sentinels = {"error": str(e)}
 
     env_keys = ["KLAVIYO_API_KEY", "SHOPIFY_ACCESS_TOKEN", "BEEZY_ANTHROPIC_API_KEY",
-                "SLACK_BOT_TOKEN", "DATABASE_URL", "HIGGSFIELD_KEY"]
+                "SLACK_BOT_TOKEN", "NEON_DATABASE_URL", "HIGGSFIELD_KEY"]
     env_status = {k: bool(_os.environ.get(k)) for k in env_keys}
 
     return JSONResponse({

@@ -16,7 +16,7 @@ import sys
 
 import psycopg
 
-from config import DATABASE_URL
+from config import NEON_DATABASE_URL
 from lib.slack import post_draft
 from workers.image_gen import generate_cover, DEFAULT_MODEL
 
@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-slack", action="store_true")
     args = parser.parse_args(argv)
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(NEON_DATABASE_URL) as conn:
         cur = conn.execute(
             """
             select cover_image_prompt, subject_line, character_name, character_year,
@@ -67,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[regen] image url: {img.url}")
     print(f"[regen] elapsed: {img.elapsed_seconds:.1f}s")
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(NEON_DATABASE_URL) as conn:
         conn.execute(
             "update issues set cover_image_url = %s where number = %s",
             (img.url, args.issue),

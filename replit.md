@@ -20,7 +20,7 @@ Points to `NEXT_PUBLIC_API_URL` (default: `http://localhost:8080`).
 ### One-off jobs
 ```bash
 # Apply DB migrations
-psql "$DATABASE_URL" -f db/schema.sql
+psql "$NEON_DATABASE_URL" -f db/schema.sql
 
 # Historical data backfill
 python -m workers.klaviyo_backfill --month 2026-05
@@ -81,7 +81,7 @@ python -m ingestion.sync all --lookback-days 7
 
 ## Required environment variables (Replit Secrets)
 
-`DATABASE_URL`, `BEEZY_ANTHROPIC_API_KEY`, `KLAVIYO_API_KEY`, `KLAVIYO_FROM_EMAIL`, `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_ACCESS_TOKEN`, `HIGGSFIELD_KEY`, `HIGGSFIELD_SECRET`, `SLACK_BOT_TOKEN`, `SLACK_WEBHOOK_URL`, `REPLIT_DOMAIN`
+`NEON_DATABASE_URL`, `BEEZY_ANTHROPIC_API_KEY`, `KLAVIYO_API_KEY`, `KLAVIYO_FROM_EMAIL`, `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_ACCESS_TOKEN`, `HIGGSFIELD_KEY`, `HIGGSFIELD_SECRET`, `SLACK_BOT_TOKEN`, `SLACK_WEBHOOK_URL`, `REPLIT_DOMAIN`
 
 ## Gotchas
 

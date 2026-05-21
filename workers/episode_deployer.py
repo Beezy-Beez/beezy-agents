@@ -44,7 +44,7 @@ from typing import Any
 
 import psycopg
 
-from config import DATABASE_URL
+from config import NEON_DATABASE_URL
 from lib.slack import post_draft, notify_failure
 
 
@@ -567,7 +567,7 @@ def _save_episode(meta: dict[str, Any], page_url: str,
     """Upsert episode row to episodes table."""
     episode_id = meta.get("episode_id") or f"ep_{uuid.uuid4().hex[:10]}"
     try:
-        with psycopg.connect(DATABASE_URL) as conn:
+        with psycopg.connect(NEON_DATABASE_URL) as conn:
             conn.execute(
                 """
                 INSERT INTO episodes

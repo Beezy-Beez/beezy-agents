@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 import psycopg
 
-from config import DATABASE_URL
+from config import NEON_DATABASE_URL
 from lib.slack import post_draft
 from workers.shopify_page_builder import build_page_html
 from workers.shopify_publisher import create_page, upload_image_to_shopify
@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 6
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(NEON_DATABASE_URL) as conn:
         _update_page_fields(conn, args.issue, args.page_title, args.page_dek, args.breadcrumb)
         issue = _fetch_issue(conn, args.issue)
         if not issue:
@@ -176,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[publish] FAILED at image upload: {type(e).__name__}: {e}", file=sys.stderr)
             return 4
         print(f"[publish]   image_id={image_info['id']}")
-        with psycopg.connect(DATABASE_URL) as conn:
+        with psycopg.connect(NEON_DATABASE_URL) as conn:
             _checkpoint_image(conn, args.issue, image_info)
         print(f"[publish]   checkpointed image to DB")
 
@@ -204,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[publish]   page_id={page_info['id']}")
     print(f"[publish]   public_url={page_info['url']}")
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(NEON_DATABASE_URL) as conn:
         _save_page_state(conn, args.issue, page_info)
     print(f"[publish] saved page state to issues row.")
 

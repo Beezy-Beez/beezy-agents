@@ -15,7 +15,7 @@ import sys
 
 import psycopg
 
-from config import DATABASE_URL
+from config import NEON_DATABASE_URL
 from lib.slack import post_draft
 from workers.shopify_page_builder import build_page_html
 from workers.shopify_publisher import update_page
@@ -47,7 +47,7 @@ def main(argv=None):
     parser.add_argument("--no-slack", action="store_true")
     args = parser.parse_args(argv)
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(NEON_DATABASE_URL) as conn:
         issue = _fetch_issue(conn, args.issue)
 
     if not issue:
