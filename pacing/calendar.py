@@ -29,8 +29,9 @@ import anthropic
 from db.connection import get_conn
 from lib.slack import notify_failure, post_draft
 from pacing.brain import active_goals, compute_pacing_state, top_contributors
+from pacing.strategy_snapshot import run_snapshot, save_snapshot
 
-MODEL = "claude-opus-4-6"
+MODEL = "claude-opus-4-6"  # TODO: A/B test 4.7 after Task 8 — May 21 2026
 
 # Colour map for the HTML report
 CONTENT_TYPE_COLORS = {
@@ -217,7 +218,7 @@ def _build_context(month_start: date) -> str:
         "brand": "Beezy Beez Honey — DTC botanical extract honey, women 50+, sleep support, ~$54.95 AOV",
         "planning_month": str(month_start)[:7],
         "planning_period_first_day": str(max(month_start, date.today())),
-        "planning_period_last_day": str(month_end - __import__("datetime").timedelta(days=1)),
+        "planning_period_last_day": str(month_end - timedelta(days=1)),
         "days_in_month": days_in_month,
         "IMPORTANT": "Generate slots covering ALL days from planning_period_first_day through planning_period_last_day inclusive. Do not stop before the last day.",
         "goals_and_pacing": pacing,
@@ -453,6 +454,171 @@ OUTPUT: valid JSON only. No markdown, no preamble, no trailing text. Schema:
 }"""
 
 
+# ── Strategy Snapshot integration (Task 2) ────────────────────────────────────
+
+class CalendarValidationError(RuntimeError):
+    """Raised when generated calendar slots fail snapshot-citation validation."""
+    pass
+
+
+def format_trajectories_table(trajectories: dict) -> str:
+    """snapshot.format_trajectories → markdown table.
+    Columns: format | sends_30d | rpr_30d | rpr_91-180d | trend | change."""
+    if not trajectories:
+        return "_(no trajectory data)_"
+    lines = [
+        "| Format | Sends 30d | RPR 30d | RPR 91–180d | Trend | Change |",
+        "|---|---:|---:|---:|---|---:|",
+    ]
+    def _rpr30(item):
+        return (item[1].get("Last 30d") or {}).get("rpr", 0)
+    for fmt, t in sorted(trajectories.items(), key=_rpr30, reverse=True):
+        recent = t.get("Last 30d") or {}
+        old = t.get("91-180d") or {}
+        change = t.get("change_pct")
+        change_s = f"{change:+.1f}%" if change is not None else "—"
+        lines.append(
+            f"| {fmt} | {recent.get('sends', 0)} | "
+            f"${recent.get('rpr', 0):.3f} | ${old.get('rpr', 0):.3f} | "
+            f"{t.get('trend', '?')} | {change_s} |"
+        )
+    return "\n".join(lines)
+
+
+def top_rpr_table(rows: list) -> str:
+    """Top-RPR slice → markdown table.
+    Columns: date | campaign | format | recipients | revenue | rpr."""
+    if not rows:
+        return "_(no qualifying campaigns)_"
+    lines = [
+        "| Date | Campaign | Format | Recipients | Revenue | RPR |",
+        "|---|---|---|---:|---:|---:|",
+    ]
+    for r in rows:
+        name = (r.get("name") or "")[:60]
+        lines.append(
+            f"| {r.get('date', '')} | {name} | {r.get('format', '')} | "
+            f"{r.get('recipients', 0):,} | ${r.get('revenue', 0):,.0f} | "
+            f"${r.get('rpr', 0):.3f} |"
+        )
+    return "\n".join(lines)
+
+
+def recency_audit_table(audit: dict) -> str:
+    """snapshot.recency_audit → markdown table, sorted FRESH → WARM → REST."""
+    if not audit:
+        return "_(no audiences touched in the lookback window)_"
+    status_order = {"FRESH": 0, "WARM": 1, "REST": 2}
+    items = sorted(
+        audit.items(),
+        key=lambda kv: (status_order.get(kv[1].get("status", "REST"), 99),
+                        -kv[1].get("last_touch_days_ago", 0)),
+    )
+    lines = [
+        "| Audience | Status | Last touch (d ago) | Touches last 14d |",
+        "|---|---|---:|---:|",
+    ]
+    for aud, data in items:
+        lines.append(
+            f"| {aud} | {data.get('status', '?')} | "
+            f"{data.get('last_touch_days_ago', '?')} | "
+            f"{data.get('touches_last_14d', 0)} |"
+        )
+    return "\n".join(lines)
+
+
+def abandoned_winners_table(winners: list) -> str:
+    """snapshot.abandoned_winners → markdown table."""
+    if not winners:
+        return "_(no abandoned winners — all historical formats still in rotation)_"
+    lines = [
+        "| Last sent | Campaign | Format | Revenue |",
+        "|---|---|---|---:|",
+    ]
+    for w in winners:
+        name = (w.get("name") or "")[:60]
+        lines.append(
+            f"| {w.get('date', '')} | {name} | {w.get('format', '')} | "
+            f"${w.get('revenue', 0):,.0f} |"
+        )
+    return "\n".join(lines)
+
+
+def _build_snapshot_section(snapshot: dict, revenue_goal: float | None = None) -> str:
+    """Compose the snapshot prompt block that Opus must consult and cite."""
+    lb = snapshot.get("live_baseline", {})
+    locked_rules = snapshot.get("locked_rules_active", [])
+    goal_line = f"${revenue_goal:,.0f}" if revenue_goal else "as stated by Alan"
+    return (
+        "REVENUE BASELINE (LIVE FROM KLAVIYO):\n"
+        f"- Campaigns MTD: ${lb.get('campaigns_mtd', 0):,.2f}\n"
+        f"- Flows MTD: ${lb.get('flows_mtd', 0):,.2f}\n"
+        f"- Daily pace: Campaigns ${lb.get('campaigns_daily_pace', 0):,.2f}/day, "
+        f"Flows ${lb.get('flows_daily_pace', 0):,.2f}/day\n"
+        f"- Days remaining in month: {lb.get('days_remaining_in_month', '?')}\n"
+        f"- Projected exit at current pace: ${lb.get('projected_exit_at_current_pace', 0):,.2f}\n"
+        f"- Revenue goal: {goal_line}\n\n"
+        "FORMAT TRAJECTORIES (RPR trends):\n"
+        + format_trajectories_table(snapshot.get("format_trajectories", {})) + "\n\n"
+        "TOP RPR LAST 60d (cite by campaign name or format):\n"
+        + top_rpr_table((snapshot.get("top_25_rpr_last_60d") or [])[:10]) + "\n\n"
+        "RECENCY AUDIT (do NOT schedule REST audiences):\n"
+        + recency_audit_table(snapshot.get("recency_audit", {})) + "\n\n"
+        "ABANDONED WINNERS (formats earning $1K+ not used recently — consider reviving):\n"
+        + abandoned_winners_table(snapshot.get("abandoned_winners", [])) + "\n\n"
+        "LOCKED RULES (must enforce):\n"
+        + "\n".join(f"- {r}" for r in locked_rules) + "\n\n"
+        "For each slot, the `rationale` field MUST cite a snapshot data point above "
+        "by name — a format from FORMAT TRAJECTORIES, an audience from the RECENCY "
+        "AUDIT, a campaign from TOP RPR, or an entry from ABANDONED WINNERS. Slots "
+        "with non-zero revenue_estimate whose rationale does not cite snapshot data "
+        "will be REJECTED.\n"
+    )
+
+
+def _validate_slot_citations(cal: dict, snapshot: dict) -> list[str]:
+    """Return list of validation errors — empty list = valid.
+
+    Slot must cite snapshot data in its `rationale` if revenue_estimate > 0.
+    Citation = case-insensitive substring match against any format name,
+    audience name, top-RPR/revenue campaign name, or abandoned-winner name.
+    """
+    tokens: set[str] = set()
+    for fmt in (snapshot.get("format_trajectories") or {}):
+        if fmt and fmt != "Other":
+            tokens.add(fmt.lower())
+    for aud in (snapshot.get("recency_audit") or {}):
+        if aud:
+            tokens.add(aud.lower())
+    for r in (snapshot.get("top_25_rpr_last_60d") or [])[:25]:
+        name = (r.get("name") or "").strip()
+        if len(name) >= 8:
+            tokens.add(name.lower())
+    for r in (snapshot.get("top_25_revenue_last_60d") or [])[:25]:
+        name = (r.get("name") or "").strip()
+        if len(name) >= 8:
+            tokens.add(name.lower())
+    for w in (snapshot.get("abandoned_winners") or []):
+        name = (w.get("name") or "").strip()
+        if len(name) >= 8:
+            tokens.add(name.lower())
+
+    errors: list[str] = []
+    for s in cal.get("slots", []):
+        rev = float(s.get("revenue_estimate", 0) or 0)
+        if rev <= 0:
+            continue  # SEO blog / flow experiment exempt
+        rationale = (s.get("rationale") or "").lower()
+        if not any(tok in rationale for tok in tokens):
+            errors.append(
+                f"slot {s.get('date', '?')} "
+                f"({s.get('content_type', '?')} → {s.get('audience', '?')}, "
+                f"${rev:,.0f}): rationale does not cite snapshot data — "
+                f"{(s.get('rationale') or '')[:120]!r}"
+            )
+    return errors
+
+
 def _repair_json(raw: str) -> dict:
     """
     Attempt to recover a valid calendar dict from a malformed JSON string.
@@ -510,7 +676,7 @@ def _fetch_segment_rpr() -> dict:
         return {"perf": {}, "pacing": {}, "context_text": "\n".join(lines)}
 
 
-def _call_opus(context_str: str) -> dict:
+def _call_opus(context_str: str, snapshot_section: str = "") -> dict:
     api_key = os.environ.get("BEEZY_ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("BEEZY_ANTHROPIC_API_KEY is not set.")
@@ -522,7 +688,8 @@ def _call_opus(context_str: str) -> dict:
         messages=[{
             "role": "user",
             "content": (
-                "Here is the current performance and planning context. "
+                (snapshot_section + "\n\n" if snapshot_section else "")
+                + "Here is the current performance and planning context. "
                 "Generate the content calendar for the FULL calendar month shown below. "
                 "Cover EVERY day from the 1st through the last day of the month — do not stop early. "
                 "Include weekends (Sat + Sun). All 7 days are valid send days. "
@@ -802,14 +969,33 @@ def generate(month_start: date) -> dict:
     import time as _time
     print(f"[calendar] Generating calendar for {month_start.strftime('%B %Y')}...")
 
+    # Mandatory Strategy Snapshot before any prompt assembly (Task 2).
+    print("[calendar] Running Strategy Snapshot...")
+    snapshot = run_snapshot()
+    snapshot_path = save_snapshot(snapshot)
+    print(f"[calendar]   Snapshot saved: {snapshot_path}")
+    snapshot_section = _build_snapshot_section(snapshot)
+
     print("[calendar] Fetching context data...")
     context_str = _build_context(month_start)
     print(f"[calendar]   Context: {len(context_str):,} chars")
 
     print("[calendar] Calling Opus (this may take 30-60 seconds)...")
-    cal = _call_opus(context_str)
+    cal = _call_opus(context_str, snapshot_section)
     slots = cal.get("slots", [])
     print(f"[calendar]   {len(slots)} slots generated")
+
+    # Snapshot-citation validation. Runs BEFORE the auto-fill block below —
+    # auto-filled slots have canned rationales that don't cite snapshot data.
+    citation_errors = _validate_slot_citations(cal, snapshot)
+    if citation_errors:
+        msg = (
+            f"Calendar validation failed: {len(citation_errors)} slot(s) "
+            "missing snapshot citations.\n  - "
+            + "\n  - ".join(citation_errors[:20])
+        )
+        print(f"[calendar]   {msg}")
+        raise CalendarValidationError(msg)
 
     # Post-process: fill any missing days that Opus skipped
     if slots:
@@ -893,15 +1079,16 @@ def generate(month_start: date) -> dict:
         else:
             print(f"[calendar]   Full month coverage verified through {month_end_d}")
 
-    # Revenue — Replit cannot reach a.klaviyo.com (DNS blocked)
-    # Revenue is embedded when calendar is built in Claude conversation
+    # Live MTD revenue from the Strategy Snapshot. Field names preserved for
+    # the HTML dashboard cards (this file) and the Slack `view calendar` command
+    # (agents/slack_agent.py) which read campaign_revenue_mtd / flow_revenue_mtd
+    # off the persisted decision JSONB.
     planned_total = sum(float(s.get('revenue_estimate', 0)) for s in cal.get('slots', []))
-    if 'campaign_revenue_mtd' not in cal:
-        cal['campaign_revenue_mtd'] = 0
-        cal['flow_revenue_mtd'] = 0
+    _cr = float(snapshot['live_baseline'].get('campaigns_mtd', 0))
+    _fr = float(snapshot['live_baseline'].get('flows_mtd', 0))
+    cal['campaign_revenue_mtd'] = _cr
+    cal['flow_revenue_mtd'] = _fr
     cal['calendar_projected_revenue'] = round(planned_total, 2)
-    _cr = float(cal.get('campaign_revenue_mtd', 0))
-    _fr = float(cal.get('flow_revenue_mtd', 0))
     cal['total_projected'] = round(_cr + _fr + planned_total, 2)
     cal['monthly_goal'] = 150000
     cal['gap_to_goal'] = round(150000 - (_cr + _fr + planned_total), 2)
