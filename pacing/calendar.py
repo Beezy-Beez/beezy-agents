@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import date, timedelta, datetime, timezone
 from decimal import Decimal
 
@@ -198,11 +199,19 @@ def _fetch_pacing_context() -> list[dict]:
 
 # ── Opus call ─────────────────────────────────────────────────────────────────
 
-def _build_context(month_start: date) -> str:
-    if month_start.month == 12:
+def _build_context(month_start: date, end_date: date | None = None) -> str:
+    """Build the Opus prompt context.
+
+    month_start  — first day of the month containing the planning window
+                   (used for snapshot scoping, MTD math, and report labels).
+    end_date     — last day of the planning window (default: end of month).
+    """
+    if end_date is None and month_start.month == 12:
         month_end = date(month_start.year + 1, 1, 1)
-    else:
+    elif end_date is None:
         month_end = date(month_start.year, month_start.month + 1, 1)
+    else:
+        month_end = end_date + timedelta(days=1)
     days_in_month = (month_end - month_start).days
 
     pacing       = _fetch_pacing_context()
@@ -214,11 +223,14 @@ def _build_context(month_start: date) -> str:
 
     seg_data = _fetch_segment_rpr()
 
+    planning_first = str(max(month_start, date.today()))
+    planning_last  = str(end_date or (month_end - timedelta(days=1)))
+
     ctx = {
         "brand": "Beezy Beez Honey — DTC botanical extract honey, women 50+, sleep support, ~$54.95 AOV",
         "planning_month": str(month_start)[:7],
-        "planning_period_first_day": str(max(month_start, date.today())),
-        "planning_period_last_day": str(month_end - timedelta(days=1)),
+        "planning_period_first_day": planning_first,
+        "planning_period_last_day": planning_last,
         "days_in_month": days_in_month,
         "IMPORTANT": "Generate slots covering ALL days from planning_period_first_day through planning_period_last_day inclusive. Do not stop before the last day.",
         "goals_and_pacing": pacing,
@@ -346,6 +358,65 @@ Flows generate ~29-30% of Klaviyo revenue. The long-term target is 70%. Until fl
 that target, campaigns must carry the revenue load. This means running campaigns aggressively
 NOW while simultaneously strengthening flows. The $150K+ monthly Klaviyo goal requires high
 campaign volume. This is the explicit strategy — not a bug.
+
+═══════════════════════════════════════════════════════════════════════════════
+HARD RULES — MANDATORY. THESE OVERRIDE ALL OTHER GUIDANCE IN THIS PROMPT.
+Violating any of these is an invalid plan.
+═══════════════════════════════════════════════════════════════════════════════
+
+MANDATORY RULE 1 — Per-audience touch budget:
+No audience receives more than 3 email/SMS sends in any 10-day rolling window.
+Active Seal (audience: active_seal): max 3 touches per 10 days with minimum 4-day
+gap between sends. All Engaged Customers (audience: engaged_customers): max 3
+quality touches per 10 days. VIPs (audience: vip): max 3 touches per 10 days.
+Lapsed cohorts (lapsed_30d, lapsed_60d, lapsed_90d, lapsed_180d): max 2 touches
+per 10 days per cohort.
+
+MANDATORY RULE 2 — $25 Credit format frequency cap:
+$25 Credit format (subject lines containing "$25 Credit" or "$15 credit") sent
+to any single audience cohort: maximum once per 14 days. Stacking multiple $25
+Credit sends to overlapping cohorts within 14 days is forbidden.
+
+MANDATORY RULE 3 — No speculative sniper followups:
+Do NOT generate sniper_followup slots in the calendar. SNIPER Hot List dispatches
+are triggered by a downstream process that fires automatically when a parent
+campaign produces qualified hot opens/clicks. Calendar slots for sniper_followup
+are never appropriate. This overrides any earlier guidance suggesting sniper
+follow-ups should be planned.
+
+MANDATORY RULE 4 — Members & Subscribers Newsletter cadence:
+The plan must include at least one Members & Subscribers Newsletter slot
+(content_type: klaviyo_campaign, audience: members_subscribers,
+format: members_subscribers_newsletter) every 5-7 days, target 6 days between
+sends. The Members & Subs audience is DISTINCT from engaged_customers — do not
+fold these into generic klaviyo_campaign slots to engaged_customers.
+
+MANDATORY RULE 5 — Holiday/named-moment requirement:
+When the planning window contains a recognized commercial holiday (Mother's Day,
+Memorial Day, July 4th, Labor Day, Black Friday, Cyber Monday, Christmas, New
+Year's), at least one named-moment campaign slot must anchor the holiday with a
+strategic offer to a high-value audience (VIP, High-AOV, or Whales).
+Memorial Day = May 25-26. July 4th = July 3-4. Labor Day = first Monday of September.
+
+MANDATORY RULE 6 — Weekly named-moment rotation:
+At least one named-moment campaign slot per 7-day window, no more than 2
+consecutive same-hook moments. Tuesday rotation: Anchor / Buy X Get Y /
+Editorial / SNIPER (rotate weekly). Saturday named-moment rotation acceptable
+for offers.
+
+MANDATORY RULE 7 — Strict window enforcement:
+Slots MUST have slot_date >= planning_period_first_day AND slot_date <=
+planning_period_last_day. Slots dated before planning_period_first_day are
+INVALID and must not be generated, even if useful sends could be placed there.
+The calendar generates the requested window only.
+
+MANDATORY RULE 8 — Slot density discipline:
+Total paid-send slots (email + SMS, excluding seo_blog and flow_experiment with
+$0 projected revenue) should average 1.4-2.0 per day across the planning window.
+A 10-day window has a target of 14-20 paid sends. Exceeding 25 paid sends in 10
+days indicates audience over-touch and is forbidden.
+
+═══════════════════════════════════════════════════════════════════════════════
 
 CAMPAIGN VOLUME RULES:
 - A day CAN and SHOULD have 2–4 email sends. Each send MUST target a distinct segment
@@ -578,47 +649,404 @@ def _build_snapshot_section(snapshot: dict, revenue_goal: float | None = None) -
     )
 
 
-def _validate_slot_citations(cal: dict, snapshot: dict) -> list[str]:
+# Citation matcher — normalizes both sides so that punctuated format names
+# (e.g. "Members/Engaged Newsletter", "SNIPER (Hot List)") match the natural-
+# language forms Opus writes ("members engaged newsletter", "SNIPER format").
+# Parens, ampersands, pipes, slashes, dashes, underscores all collapse to spaces.
+_CITATION_PUNCT_RE = re.compile(r"[.,—–\-_|/()&]+")
+_CITATION_WS_RE    = re.compile(r"\s+")
+
+def _normalize_citation(s: str) -> str:
+    """Lowercase, replace .,—–-_|/()& with spaces, collapse whitespace,
+    then strip a leading article ('the ', 'a ', 'an '). Applied to both
+    allowlist tokens AND rationale text — so 'The Newsletter Issue 5'
+    (token) matches 'Newsletter Issue 5' (rationale) after normalization."""
+    s = (s or "").lower()
+    s = _CITATION_PUNCT_RE.sub(" ", s)
+    s = _CITATION_WS_RE.sub(" ", s).strip()
+    for prefix in ("the ", "an ", "a "):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    return s
+
+
+# Abbreviation aliases — applied to ALLOWLIST tokens only (not rationale).
+# For each token, every alias key that appears in the token spawns a sibling
+# token with the key substituted by its value. So 'members subscribers' becomes
+# {'members subscribers', 'members subs'} once the subscribers→subs alias is
+# applied, and either variant can substring-match a rationale.
+#
+# This is a list of (canonical, paraphrase) pairs, NOT a dict, so the same
+# canonical phrase can expand to several paraphrase variants without key
+# collisions. Bidirectional pairs handle both directions: snapshot says
+# 'Subscribers', rationale says 'Subs' — and vice-versa.
+#
+# Aliases match POST-NORMALIZE tokens (lowercase, no .,—–-_|/()& punctuation).
+# So 'M&S' arrives as 'm s' and 'Members & Subscribers' as 'members subscribers'.
+_ABBREVIATION_ALIASES: list[tuple[str, str]] = [
+    ("subs",                        "subscribers"),
+    ("subscribers",                 "subs"),
+    ("mems",                        "members"),
+    ("members",                     "mems"),
+    ("members subscribers",         "m s"),               # canonical → post-normalize "M&S"
+    ("members engaged newsletter",  "members newsletter"),# canonical → drop the descriptor
+    ("newsletter issue",            "issue"),
+    ("sleep audio",                 "sleep_audio"),
+    ("active seal",                 "active_seal"),
+    ("engaged customers",           "engaged_customers"),
+    ("hive mind",                   "hive_mind"),
+]
+
+
+def _expand_alias_variants(token: str) -> set[str]:
+    """Return {token} plus every single-substitution variant where an alias
+    key contained in `token` is replaced by its value."""
+    variants = {token}
+    for src, dst in _ABBREVIATION_ALIASES:
+        if src and src in token:
+            variants.add(token.replace(src, dst))
+    return variants
+
+
+# Section header citations Opus naturally writes when grounding a rationale.
+# These are sections of the snapshot rendered by _build_snapshot_section;
+# referencing them by name is a valid form of citation.
+_SNAPSHOT_SECTION_TOKENS = (
+    "RECENCY AUDIT", "TOP RPR", "TOP-RPR",
+    "ABANDONED WINNERS", "FORMAT TRAJECTORIES", "FORMAT-TRAJECTORIES",
+    "LIVE BASELINE", "LOCKED RULES", "MTD",
+)
+
+
+# ── Post-process constraint filter (HARD RULES 1 + 2) ─────────────────────────
+# Deterministic enforcement layer that runs AFTER Opus returns but BEFORE
+# validation. Opus has been observed to acknowledge the rules in its rationale
+# ("CANNOT SCHEDULE") and then schedule the slot anyway. Prompt-level guidance
+# is not load-bearing — this filter is.
+
+_TOUCH_BUDGET = {
+    "active_seal":         3,
+    "engaged_customers":   3,
+    "vip":                 3,
+    "lapsed_30d":          2,
+    "lapsed_60d":          2,
+    "lapsed_90d":          2,
+    "lapsed_180d":         2,
+    "whales":              2,
+    "members_subscribers": 2,
+    "one_time_buyers":     2,
+}
+_DEFAULT_TOUCH_BUDGET = 3   # any audience not listed
+_ACTIVE_SEAL_MIN_GAP_DAYS = 4
+_TOUCH_WINDOW_DAYS = 10
+_CREDIT_WINDOW_DAYS = 14
+_NON_TOUCH_TYPES = {"seo_blog", "flow_experiment"}
+
+
+def _is_credit_slot(s: dict) -> bool:
+    """True if this slot is a $25/$15 Credit-format send (any phrasing)."""
+    haystack = " ".join((
+        s.get("format") or "",
+        s.get("topic_angle") or "",
+    )).lower()
+    return any(needle in haystack for needle in ("$25 credit", "$15 credit", "25 credit"))
+
+
+def _filter_slots_by_constraints(slots: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Apply HARD RULES 1 + 2 as a deterministic post-process drop.
+
+    Rule 1: per-audience touch budget in a rolling 10-day window. Threshold
+            per audience from _TOUCH_BUDGET (default 3 for unlisted). Slots
+            with content_type in {seo_blog, flow_experiment} are exempt — they
+            generate no email/SMS touch.
+    Rule 1 (active_seal extra): minimum 4-day gap between consecutive
+            active_seal sends, regardless of trailing-window count.
+    Rule 2: $25/$15 Credit format per audience cohort capped at 1 send per
+            14-day rolling window.
+
+    Slots are evaluated in (date, send_time_est) order. For each candidate,
+    we look at ALREADY-KEPT slots in the trailing window. This means earlier
+    slots win; later duplicates are dropped. Returns (kept, dropped).
+    """
+    if not slots:
+        return [], []
+
+    def _slot_date(s: dict) -> date | None:
+        d = s.get("date")
+        if not d:
+            return None
+        try:
+            return date.fromisoformat(d)
+        except (ValueError, TypeError):
+            return None
+
+    ordered = sorted(
+        slots,
+        key=lambda x: (
+            _slot_date(x) or date.max,
+            x.get("send_time_est") or "00:00",
+        ),
+    )
+
+    kept: list[dict] = []
+    dropped: list[dict] = []
+
+    for s in ordered:
+        d = _slot_date(s)
+        if d is None:
+            kept.append(s)  # malformed-date slots are not the filter's job
+            continue
+
+        ctype = s.get("content_type") or ""
+        aud   = (s.get("audience") or "").strip()
+        reasons: list[str] = []
+
+        # Non-touch slot types bypass Rule 1, but Rule 2 still applies if the
+        # format is somehow Credit-flavored (defensive — shouldn't happen).
+        is_touch = ctype not in _NON_TOUCH_TYPES
+
+        # Rule 1: trailing 10-day window per-audience cap.
+        if is_touch and aud:
+            window_start = d - timedelta(days=_TOUCH_WINDOW_DAYS - 1)
+            recent_same_aud = [
+                k for k in kept
+                if (k.get("audience") or "").strip() == aud
+                and (k.get("content_type") or "") not in _NON_TOUCH_TYPES
+                and (kd := _slot_date(k)) is not None
+                and window_start <= kd <= d
+            ]
+            cap = _TOUCH_BUDGET.get(aud, _DEFAULT_TOUCH_BUDGET)
+            if len(recent_same_aud) >= cap:
+                reasons.append("rule_1_touch_budget")
+
+        # Rule 1: active_seal 4-day minimum gap (overlays the cap above).
+        if is_touch and aud == "active_seal":
+            last_active = max(
+                (kd for k in kept
+                 if (k.get("audience") or "").strip() == "active_seal"
+                 and (k.get("content_type") or "") not in _NON_TOUCH_TYPES
+                 and (kd := _slot_date(k)) is not None),
+                default=None,
+            )
+            if last_active and (d - last_active).days < _ACTIVE_SEAL_MIN_GAP_DAYS:
+                if "rule_1_touch_budget" not in reasons:
+                    reasons.append("rule_1_active_seal_gap")
+
+        # Rule 2: $25/$15 Credit format, 14-day per-cohort cooldown.
+        if _is_credit_slot(s) and aud:
+            window_start = d - timedelta(days=_CREDIT_WINDOW_DAYS - 1)
+            recent_credit = [
+                k for k in kept
+                if (k.get("audience") or "").strip() == aud
+                and _is_credit_slot(k)
+                and (kd := _slot_date(k)) is not None
+                and window_start <= kd <= d
+            ]
+            if recent_credit:
+                reasons.append("rule_2_credit_cooldown")
+
+        if reasons:
+            dropped.append({
+                "date":               s.get("date"),
+                "content_type":       ctype,
+                "audience":           aud,
+                "format":             s.get("format") or s.get("topic_angle") or "",
+                "projected_revenue":  float(s.get("revenue_estimate", 0) or 0),
+                "drop_reason":        " + ".join(reasons),
+            })
+        else:
+            kept.append(s)
+
+    return kept, dropped
+
+
+def _inject_missing_members_subs_newsletter(
+    slots: list[dict],
+    snapshot: dict,
+    start_date: date,
+    end_date: date,
+) -> tuple[list[dict], list[dict]]:
+    """Cadence guard for Rule 4. If the planning window contains no Members &
+    Subs Newsletter slot AND the most recent newsletter send (from snapshot)
+    is > 7 days before start_date, inject one on max(start_date, last+6).
+
+    Returns (updated_slots, injected_slots). The injected slot carries
+    `injected_by_filter: True` and a rationale citing the snapshot baseline
+    (so it passes the citation validator).
+    """
+    # Already present in window?
+    for s in slots:
+        aud = (s.get("audience") or "").strip().lower()
+        fmt = (s.get("format") or "").lower()
+        if aud == "members_subscribers" or "members_subscribers_newsletter" in fmt:
+            return slots, []
+        if "members" in aud and ("subs" in aud or "subscribers" in aud):
+            return slots, []
+
+    # Find most recent M&S newsletter send in snapshot.
+    last: dict | None = None
+    for r in (snapshot.get("top_25_rpr_last_60d") or []):
+        name = r.get("name") or ""
+        fmt = r.get("format") or ""
+        is_ms = (
+            ("Members" in name and ("Subscribers" in name or "Subs" in name))
+            or "Newsletter Issue" in name
+            or "Members/Engaged Newsletter" in fmt
+        )
+        if not is_ms:
+            continue
+        try:
+            d = date.fromisoformat(r.get("date") or "")
+        except (ValueError, TypeError):
+            continue
+        if last is None or d > last["date"]:
+            last = {
+                "date":    d,
+                "name":    name,
+                "revenue": float(r.get("revenue") or 0),
+                "rpr":     float(r.get("rpr") or 0),
+            }
+
+    if last is None:
+        return slots, []  # no baseline to anchor injection
+
+    days_since = (start_date - last["date"]).days
+    if days_since <= 7:
+        return slots, []  # cadence not yet overdue
+
+    inject_date = max(start_date, last["date"] + timedelta(days=6))
+    if inject_date > end_date:
+        return slots, []  # cannot fit in the requested window
+
+    # Pull issue number from the campaign name if we can find it ("Issue 5").
+    issue_label = last["name"]
+    last_date_str = last["date"].strftime("%-m/%-d")
+    rationale = (
+        f"AUTO-INJECTED per Rule 4 enforcement. Last Members & Subscribers "
+        f"Newsletter was {days_since}d ago — overdue per 5-7d mandatory "
+        f"cadence. Prior send ({issue_label}) on {last_date_str} drove "
+        f"${last['revenue']:,.0f} at ${last['rpr']:.3f} RPR — top performer."
+    )
+
+    injected = {
+        "date":             inject_date.isoformat(),
+        "day_of_week":      inject_date.strftime("%A"),
+        "content_type":     "klaviyo_campaign",
+        "channel":          "email",
+        "audience":         "members_subscribers",
+        "format":           "members_subscribers_newsletter",
+        "topic_angle":      "auto-injected: M&S Newsletter cadence guard",
+        "send_time_est":    "14:00",
+        "priority":         "high",
+        "revenue_estimate": 1347,
+        "needs_page":       False,
+        "discount_code":    "",
+        "discount_pct":     0,
+        "rationale":        rationale,
+        "goal_alignment":   "Maintain Members & Subscribers Newsletter cadence (Rule 4)",
+        "adjustment_lever": "Reschedule via Slack if conflicts with another high-value send",
+        "injected_by_filter": True,
+    }
+    return slots + [injected], [injected]
+
+
+def _validate_slot_citations(cal: dict, snapshot: dict) -> list[dict]:
     """Return list of validation errors — empty list = valid.
 
-    Slot must cite snapshot data in its `rationale` if revenue_estimate > 0.
-    Citation = case-insensitive substring match against any format name,
-    audience name, top-RPR/revenue campaign name, or abandoned-winner name.
+    Each error is a dict: {date, content_type, audience, revenue_estimate,
+    rationale, reason}. Slots with revenue_estimate <= 0 are exempt (SEO blog
+    / flow experiments). Citation = normalized substring match against any
+    format name, audience name, top-RPR/revenue campaign name,
+    abandoned-winner name, or snapshot section header. Both allowlist tokens
+    AND rationale text pass through _normalize_citation before matching so
+    that 'Members/Engaged Newsletter' (token) and 'members & subs newsletter'
+    (rationale) compare on a level field — punctuation and pipe separators
+    don't block the match.
     """
     tokens: set[str] = set()
+
+    def _add(raw: str) -> None:
+        """Normalize + alias-expand + insert. Empty/blank tokens are dropped."""
+        norm = _normalize_citation(raw)
+        if norm:
+            tokens.update(_expand_alias_variants(norm))
+
+    # Format-trajectory keys (e.g. "Members/Engaged Newsletter", "SNIPER (Hot List)").
     for fmt in (snapshot.get("format_trajectories") or {}):
         if fmt and fmt != "Other":
-            tokens.add(fmt.lower())
+            _add(fmt)
+    # Recency-audit keys: 10 named audiences (super_engaged, vip, lapsed_30d, ...)
+    # plus opaque Klaviyo segment IDs (skipped — too short/cryptic to anchor citations).
     for aud in (snapshot.get("recency_audit") or {}):
-        if aud:
-            tokens.add(aud.lower())
-    for r in (snapshot.get("top_25_rpr_last_60d") or [])[:25]:
+        if aud and not (len(aud) == 6 and aud[0].isupper()):
+            _add(aud)
+    # Top campaigns: extract BOTH name (full pipe-separated title) AND format,
+    # plus each pipe-separated segment ≥8 chars (so "$25 Credit | One-Time
+    # Buyers Lapsed 60-90d" yields tokens for the format, the audience phrase,
+    # and the lapsed-cohort phrase — Opus rarely cites the whole campaign title
+    # verbatim, but cites these parts often).
+    for r in ((snapshot.get("top_25_rpr_last_60d") or [])[:25]
+              + (snapshot.get("top_25_revenue_last_60d") or [])[:25]):
         name = (r.get("name") or "").strip()
         if len(name) >= 8:
-            tokens.add(name.lower())
-    for r in (snapshot.get("top_25_revenue_last_60d") or [])[:25]:
-        name = (r.get("name") or "").strip()
-        if len(name) >= 8:
-            tokens.add(name.lower())
+            _add(name)
+        for part in (name.split("|") if "|" in name else []):
+            part = part.strip()
+            if len(part) >= 8:
+                _add(part)
+        fmt = (r.get("format") or "").strip()
+        if fmt and fmt != "Other":
+            _add(fmt)
     for w in (snapshot.get("abandoned_winners") or []):
         name = (w.get("name") or "").strip()
         if len(name) >= 8:
-            tokens.add(name.lower())
+            _add(name)
+        for part in (name.split("|") if "|" in name else []):
+            part = part.strip()
+            if len(part) >= 8:
+                _add(part)
+        fmt = (w.get("format") or "").strip()
+        if fmt and fmt != "Other":
+            _add(fmt)
+    # Each slot's own audience identifier — rationale citing the slot's
+    # targeted audience (e.g. "one_time_buyers RPR $0.056") is valid grounding
+    # even when that audience isn't a recency_audit key.
+    for s in cal.get("slots", []):
+        aud = (s.get("audience") or "").strip()
+        if aud:
+            _add(aud)
+    for sh in _SNAPSHOT_SECTION_TOKENS:
+        _add(sh)
+    tokens.discard("")
 
-    errors: list[str] = []
+    errors: list[dict] = []
     for s in cal.get("slots", []):
         rev = float(s.get("revenue_estimate", 0) or 0)
         if rev <= 0:
             continue  # SEO blog / flow experiment exempt
-        rationale = (s.get("rationale") or "").lower()
-        if not any(tok in rationale for tok in tokens):
-            errors.append(
-                f"slot {s.get('date', '?')} "
-                f"({s.get('content_type', '?')} → {s.get('audience', '?')}, "
-                f"${rev:,.0f}): rationale does not cite snapshot data — "
-                f"{(s.get('rationale') or '')[:120]!r}"
-            )
+        rationale_norm = _normalize_citation(s.get("rationale") or "")
+        if not any(tok in rationale_norm for tok in tokens):
+            errors.append({
+                "date":             s.get("date"),
+                "content_type":     s.get("content_type"),
+                "audience":         s.get("audience"),
+                "revenue_estimate": rev,
+                "rationale":        s.get("rationale") or "",
+                "reason":           "rationale does not cite snapshot data",
+            })
     return errors
+
+
+def _format_citation_error(e: dict) -> str:
+    """One-line human form of a validation error dict (for logs / Slack / CLI)."""
+    return (
+        f"slot {e.get('date', '?')} "
+        f"({e.get('content_type', '?')} → {e.get('audience', '?')}, "
+        f"${float(e.get('revenue_estimate', 0) or 0):,.0f}): "
+        f"{e.get('reason', 'invalid citation')} — "
+        f"{(e.get('rationale') or '')[:120]!r}"
+    )
 
 
 def _repair_json(raw: str) -> dict:
@@ -692,8 +1120,9 @@ def _call_opus(context_str: str, snapshot_section: str = "") -> dict:
             "content": (
                 (snapshot_section + "\n\n" if snapshot_section else "")
                 + "Here is the current performance and planning context. "
-                "Generate the content calendar for the FULL calendar month shown below. "
-                "Cover EVERY day from the 1st through the last day of the month — do not stop early. "
+                "Generate the content calendar for the planning period shown below. "
+                "Cover EVERY day from planning_period_first_day through planning_period_last_day "
+                "(inclusive) — do not stop early. "
                 "Include weekends (Sat + Sun). All 7 days are valid send days. "
                 "Keep each text field under 120 characters — be concise and data-specific.\n"
                 "USE THE SEGMENT RPR DATA to set revenue_estimate per slot. "
@@ -849,8 +1278,9 @@ def _save_html_report(month_start: date, html: str) -> str:
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
-def _persist_calendar(month_start: date, calendar_dict: dict) -> str:
+def _persist_calendar(month_start: date, calendar_dict: dict, window_label: str | None = None) -> str:
     summary = calendar_dict.get("summary", "")
+    label   = window_label or month_start.strftime("%B %Y")
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -862,7 +1292,7 @@ def _persist_calendar(month_start: date, calendar_dict: dict) -> str:
                 (
                     "calendar",
                     "calendar_plan",
-                    f"Calendar for {month_start.strftime('%B %Y')}: {summary}",
+                    f"Calendar for {label}: {summary}",
                     json.dumps(calendar_dict),
                 ),
             )
@@ -930,9 +1360,9 @@ def _publish_calendar_page(month_start: date, html: str) -> str:
 
 # ── Slack — executive summary only ───────────────────────────────────────────
 
-def _post_slack_summary(month_start: date, cal: dict, decision_id: str, report_path: str, page_url: str = "") -> None:
+def _post_slack_summary(month_start: date, cal: dict, decision_id: str, report_path: str, page_url: str = "", window_label: str | None = None) -> None:
     """Post a tight executive summary to Slack. No slot dump."""
-    month_label   = month_start.strftime("%B %Y")
+    month_label   = window_label or month_start.strftime("%B %Y")
     pacing_status = cal.get("pacing_status", "?")
     gap           = cal.get("monthly_revenue_gap", 0)
     daily_rate    = cal.get("required_daily_rate", 0)
@@ -966,20 +1396,48 @@ def _post_slack_summary(month_start: date, cal: dict, decision_id: str, report_p
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def generate(month_start: date) -> dict:
-    """Generate a monthly content calendar. Returns the calendar dict."""
+def generate(
+    start_date: date,
+    end_date: date | None = None,
+    revenue_goal: int | None = None,
+    persist: bool = True,
+) -> dict:
+    """Generate a content calendar for [start_date, end_date]. Returns the calendar dict.
+
+    start_date    — first day of the planning window (inclusive).
+    end_date      — last day of the planning window (default: end of start_date's month).
+    revenue_goal  — monthly revenue goal in dollars; plumbed into the snapshot section
+                    and cal["monthly_goal"]. Default 150000 if not provided.
+    persist       — if True (default), write to decisions, generate HTML report,
+                    publish to Shopify, post Slack summary. If False, return the
+                    calendar dict only — no side effects.
+    """
     import time as _time
-    print(f"[calendar] Generating calendar for {month_start.strftime('%B %Y')}...")
+    month_start = start_date.replace(day=1)
+    if end_date is None:
+        if month_start.month == 12:
+            end_date = date(month_start.year + 1, 1, 1) - timedelta(days=1)
+        else:
+            end_date = date(month_start.year, month_start.month + 1, 1) - timedelta(days=1)
+    _full_month_end = (date(month_start.year + 1, 1, 1) - timedelta(days=1)
+                       if month_start.month == 12
+                       else date(month_start.year, month_start.month + 1, 1) - timedelta(days=1))
+    is_partial_window = not (start_date == month_start and end_date == _full_month_end)
+    if is_partial_window:
+        window_label = f"{start_date.strftime('%b %-d')}-{end_date.strftime('%-d')}, {start_date.strftime('%Y')}"
+    else:
+        window_label = start_date.strftime('%B %Y')
+    print(f"[calendar] Generating calendar for {window_label}...")
 
     # Mandatory Strategy Snapshot before any prompt assembly (Task 2).
     print("[calendar] Running Strategy Snapshot...")
     snapshot = run_snapshot()
     snapshot_path = save_snapshot(snapshot)
     print(f"[calendar]   Snapshot saved: {snapshot_path}")
-    snapshot_section = _build_snapshot_section(snapshot)
+    snapshot_section = _build_snapshot_section(snapshot, revenue_goal=revenue_goal)
 
     print("[calendar] Fetching context data...")
-    context_str = _build_context(month_start)
+    context_str = _build_context(month_start, end_date=end_date)
     print(f"[calendar]   Context: {len(context_str):,} chars")
 
     print("[calendar] Calling Opus (this may take 30-60 seconds)...")
@@ -987,24 +1445,58 @@ def generate(month_start: date) -> dict:
     slots = cal.get("slots", [])
     print(f"[calendar]   {len(slots)} slots generated")
 
+    # Deterministic constraint filter (HARD RULES 1 + 2). Runs BEFORE
+    # validation: validator should only ever see slots that survived the
+    # filter. Opus has been observed to acknowledge the touch budget in its
+    # rationale and then schedule the slot anyway — the prompt is not
+    # load-bearing for these constraints; this filter is.
+    kept_slots, dropped_slots = _filter_slots_by_constraints(slots)
+    cal["slots"] = kept_slots
+    cal["dropped_slots"] = dropped_slots
+    if dropped_slots:
+        print(f"[calendar]   Post-process filter dropped {len(dropped_slots)} slot(s) "
+              f"(Rule 1 touch budget / Rule 2 credit cooldown); "
+              f"{len(kept_slots)} kept.")
+
+    # Rule 4 cadence guard — inject a Members & Subs Newsletter slot if the
+    # window contains none and the last send (per snapshot) is overdue.
+    kept_slots, injected_slots = _inject_missing_members_subs_newsletter(
+        kept_slots, snapshot, start_date, end_date,
+    )
+    cal["slots"] = kept_slots
+    cal["injected_slots"] = injected_slots
+    if injected_slots:
+        for inj in injected_slots:
+            print(f"[calendar]   Injected Members & Subs Newsletter slot on "
+                  f"{inj['date']} (Rule 4 cadence guard).")
+    slots = kept_slots
+
     # Snapshot-citation validation. Runs BEFORE the auto-fill block below —
     # auto-filled slots have canned rationales that don't cite snapshot data.
+    # In dry-run (persist=False) validation is ADVISORY: errors are attached
+    # to cal['validation_errors'] so the caller can display them alongside
+    # the slot table, but generation continues. In --save-plan mode
+    # (persist=True) validation is a hard gate — we raise so a non-citing
+    # plan never lands in the decisions table.
     citation_errors = _validate_slot_citations(cal, snapshot)
+    cal["validation_errors"] = citation_errors
     if citation_errors:
         msg = (
             f"Calendar validation failed: {len(citation_errors)} slot(s) "
             "missing snapshot citations.\n  - "
-            + "\n  - ".join(citation_errors[:20])
+            + "\n  - ".join(_format_citation_error(e) for e in citation_errors[:20])
         )
         print(f"[calendar]   {msg}")
-        raise CalendarValidationError(msg)
+        if persist:
+            raise CalendarValidationError(msg)
+        else:
+            print(f"[calendar]   persist=False — validation is advisory, continuing.")
 
     # Post-process: fill any missing days that Opus skipped
     if slots:
         from datetime import timedelta as _td
-        month_end_d = date(month_start.year + (1 if month_start.month == 12 else 0),
-                           (month_start.month % 12) + 1, 1) - _td(days=1)
-        start_d = max(month_start, date.today())
+        month_end_d = end_date
+        start_d = max(start_date, date.today())
         existing_dates = set(s.get("date","") for s in slots)
 
         # Content-aware auto-fill: Hive Mind every 3 days, sleep audio every 3 days
@@ -1092,14 +1584,21 @@ def generate(month_start: date) -> dict:
     cal['flow_revenue_mtd'] = _fr
     cal['calendar_projected_revenue'] = round(planned_total, 2)
     cal['total_projected'] = round(_cr + _fr + planned_total, 2)
-    cal['monthly_goal'] = 150000
-    cal['gap_to_goal'] = round(150000 - (_cr + _fr + planned_total), 2)
+    monthly_goal = revenue_goal if revenue_goal is not None else 150000
+    cal['monthly_goal'] = monthly_goal
+    cal['gap_to_goal'] = round(monthly_goal - (_cr + _fr + planned_total), 2)
+    cal['month'] = month_start.strftime("%Y-%m")
+    cal['window'] = {"start": start_date.isoformat(), "end": end_date.isoformat()}
+
+    if not persist:
+        print(f"[calendar] persist=False — skipping decisions write + HTML + Shopify + Slack.")
+        return cal
 
     print("[calendar] Persisting to decisions table...")
     # Retry DB save in case Neon connection died during Opus call
     for attempt in range(3):
         try:
-            decision_id = _persist_calendar(month_start, cal)
+            decision_id = _persist_calendar(month_start, cal, window_label=window_label)
             print(f"[calendar]   decision_id: {decision_id}")
             break
         except Exception as e:
@@ -1123,23 +1622,145 @@ def generate(month_start: date) -> dict:
         page_url = f"(Shopify publish failed — open {report_path} in Replit)"
 
     print("[calendar] Posting Slack summary...")
-    _post_slack_summary(month_start, cal, decision_id, report_path, page_url)
+    _post_slack_summary(month_start, cal, decision_id, report_path, page_url, window_label=window_label)
 
     print("[calendar] Done.")
     return cal
 
 
 def run_monthly(month_start: date | None = None) -> dict:
-    """Generate calendar for given month (defaults to next month when called 1 week before EOM)."""
+    """Generate calendar for given month (defaults to next month when called 1 week before EOM).
+
+    Legacy entry point — full-month, persisted. Kept for the cron caller.
+    """
     if month_start is None:
         today = date.today()
         month_start = date(today.year, today.month, 1)
     try:
-        return generate(month_start)
+        return generate(month_start, end_date=None, revenue_goal=None, persist=True)
     except Exception as e:
         notify_failure(source="calendar/run_monthly", error=str(e))
         raise
 
 
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def _insert_pending_approvals_for_range(start_date: date, end_date: date) -> list[date]:
+    """Insert a pending calendar_approvals row for every week_start spanned
+    by [start_date, end_date]. ON CONFLICT DO NOTHING — never unapproves an
+    existing row. Returns the list of week_starts touched."""
+    import uuid as _uuid
+    weeks: set[date] = set()
+    d = start_date
+    while d <= end_date:
+        weeks.add(d - timedelta(days=d.weekday()))  # Monday of d's week
+        d += timedelta(days=1)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            for week_start in sorted(weeks):
+                cur.execute(
+                    "INSERT INTO calendar_approvals (week_start, token) "
+                    "VALUES (%s, %s) ON CONFLICT (week_start) DO NOTHING",
+                    (week_start, _uuid.uuid4().hex[:16]),
+                )
+        conn.commit()
+    return sorted(weeks)
+
+
+def _cli() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="pacing.calendar",
+        description="Generate a content calendar via Opus + Strategy Snapshot.",
+    )
+    parser.add_argument("--start", type=date.fromisoformat, default=date.today(),
+                        help="ISO date — first day of the planning window (default: today)")
+    parser.add_argument("--end", type=date.fromisoformat, default=None,
+                        help="ISO date — last day of the planning window (default: end of start's month)")
+    parser.add_argument("--revenue-goal", type=int, default=None,
+                        help="Monthly revenue goal in dollars (default: 150000)")
+    parser.add_argument("--save-plan", action="store_true",
+                        help="Persist to decisions + insert pending calendar_approvals + publish + Slack (default: stdout only)")
+    args = parser.parse_args()
+
+    if args.end is None:
+        if args.start.month == 12:
+            args.end = date(args.start.year + 1, 1, 1) - timedelta(days=1)
+        else:
+            args.end = date(args.start.year, args.start.month + 1, 1) - timedelta(days=1)
+    if args.start > args.end:
+        parser.error(f"--start ({args.start}) must be <= --end ({args.end})")
+    if (args.end - args.start).days > 60:
+        parser.error(f"window {(args.end - args.start).days} days exceeds 60-day sanity cap")
+    if args.revenue_goal is not None and args.revenue_goal <= 0:
+        parser.error("--revenue-goal must be > 0")
+
+    cal = generate(args.start, args.end, revenue_goal=args.revenue_goal,
+                   persist=args.save_plan)
+    slots = cal.get("slots", [])
+
+    if args.save_plan:
+        weeks = _insert_pending_approvals_for_range(args.start, args.end)
+        print(f"\n✅ Plan saved. {len(slots)} slots covering {args.start} → {args.end}.")
+        print(f"   Pending calendar_approvals rows for week(s) starting: "
+              + ", ".join(w.isoformat() for w in weeks))
+        print(f"   Approve via Slack: type `approved week` in #beezy-agents.")
+    else:
+        print(f"\nDry-run for {args.start} → {args.end} "
+              f"(NOT persisted — re-run with --save-plan to commit).\n")
+
+        # 1) Validation outcome
+        verrors = cal.get("validation_errors") or []
+        if verrors:
+            print(f"  Validation outcome: FAIL — {len(verrors)} error(s)")
+            for e in verrors:
+                print(f"    - {_format_citation_error(e)}")
+        else:
+            print(f"  Validation outcome: PASS")
+
+        # 1b) Post-process filter — slots dropped by Rules 1 + 2
+        dropped = cal.get("dropped_slots") or []
+        print(f"\n  DROPPED: {len(dropped)} slot(s) removed by post-process filter")
+        for ds in dropped:
+            print(f"    - {ds.get('date')} {ds.get('content_type')} → "
+                  f"{ds.get('audience')} (${float(ds.get('projected_revenue') or 0):,.0f}) "
+                  f"[{ds.get('drop_reason')}]")
+        # 1c) Auto-injected slots (Rule 4 cadence guard)
+        injected = cal.get("injected_slots") or []
+        print(f"  INJECTED: {len(injected)} slot(s) auto-added by filter")
+        for inj in injected:
+            print(f"    + {inj.get('date')} {inj.get('content_type')} → "
+                  f"{inj.get('audience')} (${float(inj.get('revenue_estimate') or 0):,.0f}) "
+                  f"[Rule 4 cadence guard]")
+        print(f"  KEPT: {len(slots)} slot(s) after filter")
+
+        # 2) Slot count + per-day distribution
+        per_day: dict[str, int] = {}
+        for s in slots:
+            d = s.get("date") or "(no-date)"
+            per_day[d] = per_day.get(d, 0) + 1
+        print(f"\n  Slot count: {len(slots)} total across {len(per_day)} day(s)")
+        for d in sorted(per_day):
+            print(f"    {d}: {per_day[d]}")
+
+        # 3) Full slot table — no truncation on row count
+        print(f"\n  Slot table:")
+        print(f"  {'date':<11} {'content_type':<17} {'audience':<20} {'format':<28} {'$proj':>8}  rationale")
+        print(f"  {'-'*11} {'-'*17} {'-'*20} {'-'*28} {'-'*8}  {'-'*80}")
+        for s in sorted(slots, key=lambda x: (x.get('date') or '', x.get('send_time_est') or '00:00')):
+            rev = float(s.get('revenue_estimate', 0) or 0)
+            fmt = (s.get('format') or s.get('topic_angle') or '')[:28]
+            rat = (s.get('rationale') or '')[:80]
+            print(f"  {(s.get('date') or '?'):<11} {(s.get('content_type') or '?'):<17} "
+                  f"{(s.get('audience') or '?'):<20} {fmt:<28} ${rev:>7,.0f}  {rat}")
+
+        proj = cal.get('calendar_projected_revenue', 0)
+        goal = cal.get('monthly_goal', 0)
+        gap  = cal.get('gap_to_goal', 0)
+        print(f"\n  Projected from these slots: ${proj:,.0f}")
+        print(f"  Monthly goal:               ${goal:,.0f}")
+        print(f"  Gap to goal:                ${gap:,.0f}")
+
+
 if __name__ == "__main__":
-    run_monthly()
+    _cli()

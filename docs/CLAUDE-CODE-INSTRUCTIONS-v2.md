@@ -736,3 +736,97 @@ Once all checked, post to `#beezy-agents` Slack:
 - Update both deployer + producer to `from lib.page_slug import slug`.
 
 **Why deferred:** Task 5's minimal prefix-strip fix unblocks the validator. DRY consolidation + truncation is a follow-up cleanup with no operational urgency (no current episode title is long enough to trip the 50-char cap).
+
+---
+
+## Task 1.6: Exponential backoff for Klaviyo campaign hydration in snapshot
+
+**Status:** Deferred per Alan on 2026-05-21. Surface after Task 8.
+
+**Bug:** During Task 7's first run (May 21 2026), 8 of ~476 campaign hydration GETs in `pacing/strategy_snapshot.py` hit Klaviyo 429 rate limits, leaving 8 campaigns without name/send_time/audiences metadata. Specific IDs from the log: `01KMKQTS317HHGB8PGYCX9TN0W`, `01KMN1TW2HCFKEJJG1382555SS`, `01KMN3NNZEXZGVBAG65BMXDGGG`, `01KMN4KRWV8QFTM4188SYS5X4N`, `01KMN4R2ASP13F9KNDJ0PD1083`, `01KMRZD3M41J9Z6CZP4C91XRT7`, `01KMRZZMYHCRA70DYDB73QN8PD`, `01KMS1613FQX3A0DQGYM8T05S4`. Snapshot still completed but shipped incomplete data to Opus, which contributes to citation-validation false negatives.
+
+**Fix:** Add retry with exponential backoff (e.g., 3 retries with 1s/2s/4s delays) in the per-campaign hydration block in `pacing/strategy_snapshot.py`. Surface a final warning if any campaigns remain unhydrated after retries. Consider also throttling the initial concurrency / adding a small sleep between requests.
+
+**Why deferred:** The 8 missing campaigns don't materially change the calendar; cleanup is a hygiene improvement, not a blocker.
+
+---
+
+## Task 9: Fix `calendar_live_data.get_performance_by_segment` returning $0
+
+**Status:** Deferred per Alan on 2026-05-21. For next session.
+
+**Bug:** Already documented in CLAUDE.md "Known open bugs": `pacing/calendar_live_data.py::get_performance_by_segment` returns **$0** from Replit. Task 7's first run surfaced the same condition via the log line `"[calendar_live_data] WARNING: 14/14 audiences (100%) using hardcoded May 2026 fallbacks — performance table may be sparse"`. Every audience falls back to hardcoded May 2026 RPR/list-size constants instead of live data.
+
+**Fix:** Investigate why the function returns empty results from Replit (auth? env? query?). Get live segment performance flowing so the calendar revenue projections aren't anchored to stale constants.
+
+**Why deferred:** Calendar still generates plausible slots from hardcoded fallbacks. Live data would improve revenue-projection accuracy but isn't blocking dispatch.
+
+---
+
+## Task 10: Fix `PacingState.projected_value` AttributeError
+
+**Status:** Deferred per Alan on 2026-05-21. For next session.
+
+**Bug:** Task 7's first run surfaced a fresh error in the snapshot/calendar pipeline:
+```
+[calendar_live_data] Pacing query failed: 'PacingState' object has no attribute 'projected_value'
+```
+The pacing query in `pacing/calendar_live_data.py` (or wherever `PacingState` is constructed) is reading an attribute that doesn't exist on the dataclass.
+
+**Fix:** Locate the `PacingState` class definition, identify whether `projected_value` was renamed/removed, and either restore the attribute or update the caller to use the correct field.
+
+**Why deferred:** Failure is non-fatal — the exception is caught and the pacing context falls back to empty. Calendar still generates. Fix tightens data quality.
+
+---
+
+## Task 7.1: Opus partial-window prompt adherence
+
+**Status:** Deferred per Alan on 2026-05-21. Surface after Task 8.
+
+**Bug:** During Task 7's first run (May 21 2026) Opus was asked for a window of `2026-05-22` through `2026-05-31` and produced **one slot dated `2026-05-21`** (a hive_mind slot for hive_mind_list, $90 — also one of the citation-validator rejections). The partial-window instruction in `_build_context` + the `_call_opus` user message wasn't perfectly enforced.
+
+**Fix options:**
+- Tighten the prompt: explicit "Do NOT produce slots dated before planning_period_first_day or after planning_period_last_day. Any out-of-window slot will be rejected."
+- Add a post-filter in `generate()`: drop slots where `slot.date < start_date or slot.date > end_date` after `_call_opus` returns, before auto-fill. Log the dropped count.
+- Both — defense in depth.
+
+**Why deferred:** Single stray slot per window is low-impact (validator would catch and operator can skip). Not worth blocking Task 7 over. Real fix should be prompt + post-filter together.
+
+---
+
+## Task 7.3: Sleep audio calendar rotation enforcement
+
+**Status:** Deferred. Surface during next iteration session.
+
+**Issue:** May 22-31 plan generated 2 sleep_audio slots to engaged_customers within 3 days (5/23 + 5/26). Deployer's Task 4 audience-rotation rule (engaged_customers 7-day threshold) will catch this and skip the 5/26 email — but the page still publishes, wasting production effort on an episode that won't be emailed.
+
+**Fix:** Add HARD RULE 9 to calendar SYSTEM_PROMPT:
+```
+MANDATORY: sleep_audio slots to the same audience must respect rotation thresholds —
+engaged_customers: minimum 7 days between sends
+active_seal: minimum 5 days between sends
+The deployer enforces this at dispatch time; the calendar must respect it at planning time
+to avoid wasted episode production.
+```
+
+Plus post-process: add `rule_9_sleep_audio_rotation` to `_filter_slots_by_constraints` matching the same audience+content_type='sleep_audio' window thresholds.
+
+---
+
+## Task 7.4: Validation phrase coverage — token aliases expand-on-demand
+
+**Status:** Deferred. Low priority.
+
+**Issue:** Validator alias dictionary is hardcoded. Each new Opus paraphrase that fails validation requires a new alias entry. Long-term, the alias list bloats and becomes hard to maintain.
+
+**Better approach:** Build the allowlist from snapshot data dynamically with smarter tokenization (split on common separators, drop stopwords, normalize whitespace). Or use a small embedding model to match rationale phrases to snapshot entities semantically.
+
+---
+
+## Task 1.6 PRIORITY ESCALATION: Klaviyo 429 backoff
+
+**Status:** Was deferred, now escalating to priority.
+
+**Reason:** 429 count is unpredictable run-to-run (8 → 22 → 0 → 5 → 20 across our smoke-test + save-plan runs). When run frequency increases (calendar generation, agent loops, dashboard queries), we'll hit hard rate limits more consistently. The snapshot then ships to Opus with incomplete data, which degrades plan quality.
+
+**Fix:** Add exponential backoff to per-campaign hydration in `pacing/strategy_snapshot.py`. 3 retries with 2^attempt second delays (2s, 4s, 8s). Surface a final WARN if any campaigns remain unhydrated.
